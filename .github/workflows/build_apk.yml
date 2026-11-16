@@ -40,7 +40,7 @@ jobs:
           s = open(p).read()
           perms = "<uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\"/><uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\"/><uses-permission android:name=\"android.permission.MANAGE_EXTERNAL_STORAGE\"/><uses-permission android:name=\"android.permission.READ_MEDIA_VIDEO\"/>"
           s = s.replace("<application", perms + "<application android:requestLegacyExternalStorage=\"true\"")
-          s = s.replace("android:label=\"nmh_karaok_tab\"", "android:label=\"NMH Karaoke\"")
+          s = s.replace("android:label=\"nmh_karaok_tab\"", "android:label=\"NMH Karaoke Tab\"")
           s = s.replace("adjustResize", "adjustPan")
           open(p, "w").write(s)
           '
