@@ -1,5 +1,5 @@
 name: nmh_karaok_tab
-description: NMH Standalone Offline Dual Screen Karaoke System
+description: NMH Standalone Karaoke
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -15,11 +15,8 @@ dependencies:
   path_provider: ^2.1.4
   permission_handler: ^11.3.1
 
-dev_dependencies:
-  flutter_test:
-    sdk: flutter
-  flutter_lints: ^3.0.0
-
 flutter:
   uses-material-design: true
-  
+  assets:
+    - assets/logo.jpg
+    
