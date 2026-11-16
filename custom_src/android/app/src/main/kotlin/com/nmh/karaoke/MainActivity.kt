@@ -8,223 +8,123 @@ import android.os.Bundle
 import android.view.Display
 import android.view.SurfaceHolder
 import android.view.SurfaceView
-import android.view.WindowManager
-import android.widget.FrameLayout
+import android.view.View
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
-import java.io.File
+import io.flutter.plugin.common.StandardMessageCodec
+import io.flutter.plugin.platform.PlatformView
+import io.flutter.plugin.platform.PlatformViewFactory
 
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.nmh.karaoke/player"
-    private var displayManager: DisplayManager? = null
-    private var presentation: KaraokePresentation? = null
     private var mediaPlayer: MediaPlayer? = null
-    private var currentVoiceMode = "STEREO" // STEREO, LEFT, RIGHT, TRACK2
+    private var tvPresentation: TvPresentation? = null
+    private var tabletSurface: SurfaceView? = null
     private var methodChannel: MethodChannel? = null
-
-    private val displayListener = object : DisplayManager.DisplayListener {
-        override fun onDisplayAdded(displayId: Int) {
-            setupSecondaryDisplay()
-        }
-
-        override fun onDisplayRemoved(displayId: Int) {
-            presentation?.dismiss()
-            presentation = null
-            notifyDisplayStatus(false)
-        }
-
-        override fun onDisplayChanged(displayId: Int) {}
-    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-
-        displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
-        displayManager?.registerDisplayListener(displayListener, null)
-
         methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
-        methodChannel?.setMethodCallHandler { call, result ->
-            when (call.method) {
-                "checkDisplay" -> {
-                    val connected = setupSecondaryDisplay()
-                    result.success(connected)
-                }
-                "playVideo" -> {
-                    val path = call.argument<String>("path")
-                    if (path != null) {
-                        playVideoOnTv(path)
-                        result.success(true)
-                    } else {
-                        result.error("INVALID_PATH", "Video path is null", null)
+
+        flutterEngine.platformViewsController.registry.registerViewFactory(
+            "nmh_tablet_video",
+            object : PlatformViewFactory(StandardMessageCodec.INSTANCE) {
+                override fun create(context: Context, viewId: Int, args: Any?): PlatformView {
+                    val sv = SurfaceView(context)
+                    tabletSurface = sv
+                    sv.holder.addCallback(object : SurfaceHolder.Callback {
+                        override fun surfaceCreated(holder: SurfaceHolder) {
+                            if (tvPresentation == null) mediaPlayer?.setDisplay(holder)
+                        }
+                        override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, h2: Int) {}
+                        override fun surfaceDestroyed(h: SurfaceHolder) {
+                            if (tvPresentation == null) mediaPlayer?.setDisplay(null)
+                        }
+                    })
+                    return object : PlatformView {
+                        override fun getView(): View = sv
+                        override fun dispose() { tabletSurface = null }
                     }
                 }
+            }
+        )
+
+        val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        dm.registerDisplayListener(object : DisplayManager.DisplayListener {
+            override fun onDisplayAdded(id: Int) = updateDisplay()
+            override fun onDisplayRemoved(id: Int) = updateDisplay()
+            override fun onDisplayChanged(id: Int) = updateDisplay()
+        }, null)
+
+        methodChannel?.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "checkDisplay" -> { updateDisplay(); result.success(tvPresentation != null) }
+                "playVideo" -> { playVideo(call.argument<String>("path") ?: ""); result.success(true) }
                 "pauseResume" -> {
-                    val isPlaying = togglePauseResume()
-                    result.success(isPlaying)
+                    val mp = mediaPlayer
+                    if (mp != null) {
+                        if (mp.isPlaying) mp.pause() else mp.start()
+                        result.success(mp.isPlaying)
+                    } else result.success(false)
                 }
-                "replay" -> {
-                    mediaPlayer?.seekTo(0)
-                    mediaPlayer?.start()
-                    result.success(true)
-                }
-                "stop" -> {
-                    stopPlayback()
-                    result.success(true)
-                }
-                "setVoiceMode" -> {
-                    val mode = call.argument<String>("mode") ?: "STEREO"
-                    applyVoiceMode(mode)
-                    result.success(currentVoiceMode)
-                }
+                "stop" -> { mediaPlayer?.stop(); mediaPlayer?.reset(); result.success(true) }
+                "replay" -> { mediaPlayer?.seekTo(0); mediaPlayer?.start(); result.success(true) }
+                "setVoiceMode" -> { setVoice(call.argument<String>("mode") ?: "STEREO"); result.success(true) }
                 else -> result.notImplemented()
             }
         }
     }
 
-    private fun notifyDisplayStatus(isConnected: Boolean) {
-        runOnUiThread {
-            methodChannel?.invokeMethod("onDisplayChanged", isConnected)
-        }
-    }
-
-    private fun setupSecondaryDisplay(): Boolean {
-        val displays = displayManager?.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
-        if (!displays.isNullOrEmpty()) {
-            val tvDisplay = displays[0]
-            if (presentation == null || presentation?.display?.displayId != tvDisplay.displayId) {
-                presentation?.dismiss()
-                presentation = KaraokePresentation(this, tvDisplay)
-                presentation?.show()
+    private fun updateDisplay() {
+        val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        val displays = dm.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
+        if (displays.isNotEmpty()) {
+            if (tvPresentation == null) {
+                tvPresentation = TvPresentation(this, displays[0]) { holder -> mediaPlayer?.setDisplay(holder) }
+                tvPresentation?.show()
             }
-            notifyDisplayStatus(true)
-            return true
-        }
-        notifyDisplayStatus(false)
-        return false
-    }
-
-    private fun playVideoOnTv(filePath: String) {
-        setupSecondaryDisplay()
-        val file = File(filePath)
-        if (!file.exists()) return
-
-        try {
-            mediaPlayer?.release()
-            mediaPlayer = MediaPlayer().apply {
-                setDataSource(filePath)
-                presentation?.surfaceView?.holder?.let { holder ->
-                    if (holder.surface.isValid) {
-                        setDisplay(holder)
-                    }
-                }
-                setOnPreparedListener { mp ->
-                    applyVoiceMode(currentVoiceMode)
-                    mp.start()
-                }
-                setOnCompletionListener {
-                    runOnUiThread {
-                        methodChannel?.invokeMethod("onSongCompleted", null)
-                    }
-                }
-                prepareAsync()
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    private fun togglePauseResume(): Boolean {
-        val mp = mediaPlayer ?: return false
-        return if (mp.isPlaying) {
-            mp.pause()
-            false
+            methodChannel?.invokeMethod("onDisplayChanged", true)
         } else {
-            mp.start()
-            true
+            tvPresentation?.dismiss()
+            tvPresentation = null
+            tabletSurface?.holder?.let { if (it.surface.isValid) mediaPlayer?.setDisplay(it) }
+            methodChannel?.invokeMethod("onDisplayChanged", false)
         }
     }
 
-    private fun stopPlayback() {
-        try {
-            mediaPlayer?.stop()
-            mediaPlayer?.release()
-            mediaPlayer = null
-        } catch (e: Exception) {
-            e.printStackTrace()
+    private fun playVideo(path: String) {
+        mediaPlayer?.release()
+        mediaPlayer = MediaPlayer().apply {
+            setDataSource(path)
+            if (tvPresentation != null) tvPresentation?.surfaceHolder?.let { setDisplay(it) }
+            else tabletSurface?.holder?.let { if (it.surface.isValid) setDisplay(it) }
+            setOnPreparedListener { start() }
+            setOnCompletionListener { methodChannel?.invokeMethod("onSongCompleted", null) }
+            prepareAsync()
         }
     }
 
-    private fun applyVoiceMode(mode: String) {
-        currentVoiceMode = mode
+    private fun setVoice(mode: String) {
         val mp = mediaPlayer ?: return
-        try {
-            val tracks = mp.trackInfo
-            val audioTracks = mutableListOf<Int>()
-            for (i in tracks.indices) {
-                if (tracks[i].trackType == MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_AUDIO) {
-                    audioTracks.add(i)
-                }
-            }
-
-            when (mode) {
-                "STEREO" -> {
-                    if (audioTracks.isNotEmpty()) mp.selectTrack(audioTracks[0])
-                    mp.setVolume(1.0f, 1.0f)
-                }
-                "LEFT" -> {
-                    if (audioTracks.isNotEmpty()) mp.selectTrack(audioTracks[0])
-                    mp.setVolume(1.0f, 0.0f)
-                }
-                "RIGHT" -> {
-                    if (audioTracks.isNotEmpty()) mp.selectTrack(audioTracks[0])
-                    mp.setVolume(0.0f, 1.0f)
-                }
-                "TRACK2" -> {
-                    if (audioTracks.size > 1) {
-                        mp.selectTrack(audioTracks[1])
-                    } else if (audioTracks.isNotEmpty()) {
-                        mp.selectTrack(audioTracks[0])
-                    }
-                    mp.setVolume(1.0f, 1.0f)
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
+        when (mode) {
+            "LEFT" -> mp.setVolume(1.0f, 0.0f)
+            "RIGHT" -> mp.setVolume(0.0f, 1.0f)
+            else -> mp.setVolume(1.0f, 1.0f)
         }
     }
 
-    override fun onDestroy() {
-        displayManager?.unregisterDisplayListener(displayListener)
-        stopPlayback()
-        presentation?.dismiss()
-        super.onDestroy()
-    }
-
-    inner class KaraokePresentation(context: Context, display: Display) : Presentation(context, display) {
-        lateinit var surfaceView: SurfaceView
-
+    class TvPresentation(ctx: Context, d: Display, val onReady: (SurfaceHolder) -> Unit) : Presentation(ctx, d) {
+        var surfaceHolder: SurfaceHolder? = null
         override fun onCreate(savedInstanceState: Bundle?) {
             super.onCreate(savedInstanceState)
-            val layout = FrameLayout(context).apply {
-                setBackgroundColor(android.graphics.Color.BLACK)
-            }
-            surfaceView = SurfaceView(context)
-            surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
-                override fun surfaceCreated(holder: SurfaceHolder) {
-                    mediaPlayer?.setDisplay(holder)
-                }
-                override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
-                override fun surfaceDestroyed(holder: SurfaceHolder) {
-                    mediaPlayer?.setDisplay(null)
-                }
+            val sv = SurfaceView(context)
+            setContentView(sv)
+            sv.holder.addCallback(object : SurfaceHolder.Callback {
+                override fun surfaceCreated(h: SurfaceHolder) { surfaceHolder = h; onReady(h) }
+                override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, h2: Int) {}
+                override fun surfaceDestroyed(h: SurfaceHolder) { surfaceHolder = null }
             })
-            layout.addView(surfaceView, FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            ))
-            setContentView(layout)
         }
     }
 }
