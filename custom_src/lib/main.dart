@@ -1,3 +1,191 @@
+import 'dart:io';
+import 'package:excel/excel.dart' as xls;
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:path/path.dart' as p;
+import 'package:permission_handler/permission_handler.dart';
+import 'package:sqflite/sqflite.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await SystemChrome.setPreferredOrientations([
+    DeviceOrientation.landscapeLeft,
+    DeviceOrientation.landscapeRight,
+  ]);
+  runApp(const NMHKaraokeApp());
+}
+
+class NMHKaraokeApp extends StatelessWidget {
+  const NMHKaraokeApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'NMH Karaoke',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: const Color(0xFF0D1117),
+        primaryColor: const Color(0xFFFF9800),
+        colorScheme: const ColorScheme.dark(
+          primary: Color(0xFFFF9800),
+          secondary: Color(0xFF00E5FF),
+        ),
+      ),
+      home: const KaraokeHomeScreen(),
+    );
+  }
+}
+
+class Song {
+  final String code;
+  final String title;
+  final String artist;
+  final String coArtist;
+  final String album;
+  final bool isDisco;
+
+  Song({
+    required this.code,
+    required this.title,
+    required this.artist,
+    required this.coArtist,
+    required this.album,
+    this.isDisco = false,
+  });
+
+  Map<String, dynamic> toMap() => {
+        'code': code,
+        'title': title,
+        'artist': artist,
+        'coArtist': coArtist,
+        'album': album,
+        'isDisco': isDisco ? 1 : 0,
+      };
+
+  factory Song.fromMap(Map<String, dynamic> map) => Song(
+        code: map['code'] ?? '',
+        title: map['title'] ?? '',
+        artist: map['artist'] ?? '',
+        coArtist: map['coArtist'] ?? '',
+        album: map['album'] ?? '',
+        isDisco: (map['isDisco'] ?? 0) == 1,
+      );
+}
+
+class DatabaseHelper {
+  static Database? _db;
+
+  static Future<Database> get database async {
+    if (_db != null) return _db!;
+    final dbPath = await getDatabasesPath();
+    final path = p.join(dbPath, 'nmh_karaoke.db');
+    _db = await openDatabase(
+      path,
+      version: 1,
+      onCreate: (db, version) async {
+        await db.execute('''
+          CREATE TABLE songs(
+            code TEXT PRIMARY KEY,
+            title TEXT,
+            artist TEXT,
+            coArtist TEXT,
+            album TEXT,
+            isDisco INTEGER
+          )
+        ''');
+        await db.execute('CREATE INDEX idx_title ON songs(title)');
+        await db.execute('CREATE INDEX idx_artist ON songs(artist)');
+        await db.execute('CREATE INDEX idx_album ON songs(album)');
+      },
+    );
+    return _db!;
+  }
+
+  static Future<void> clearAndInsertSongs(List<Song> songs) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.delete('songs');
+      final batch = txn.batch();
+      for (final song in songs) {
+        batch.insert('songs', song.toMap(), conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+      await batch.commit(noResult: true);
+    });
+  }
+
+  static Future<int> getSongCount() async {
+    final db = await database;
+    final res = await db.rawQuery('SELECT COUNT(*) as cnt FROM songs');
+    return Sqflite.firstIntValue(res) ?? 0;
+  }
+
+  static Future<List<Song>> searchSongs({
+    String query = '',
+    String category = 'TITLE',
+  }) async {
+    final db = await database;
+    List<Map<String, dynamic>> maps = [];
+    final q = '%${query.trim()}%';
+
+    if (category == 'DISCO') {
+      if (query.trim().isEmpty) {
+        maps = await db.query('songs', where: 'isDisco = 1', limit: 200);
+      } else {
+        maps = await db.query(
+          'songs',
+          where: 'isDisco = 1 AND (title LIKE ? OR artist LIKE ? OR code LIKE ?)',
+          whereArgs: [q, q, q],
+          limit: 200,
+        );
+      }
+    } else if (category == 'CODE') {
+      maps = await db.query(
+        'songs',
+        where: 'code LIKE ?',
+        whereArgs: ['${query.trim()}%'],
+        limit: 100,
+      );
+    } else if (category == 'ARTIST') {
+      maps = await db.query(
+        'songs',
+        where: 'artist LIKE ? OR coArtist LIKE ?',
+        whereArgs: [q, q],
+        limit: 200,
+      );
+    } else if (category == 'ALBUM') {
+      maps = await db.query(
+        'songs',
+        where: 'album LIKE ?',
+        whereArgs: [q],
+        limit: 200,
+      );
+    } else {
+      maps = await db.query(
+        'songs',
+        where: 'title LIKE ? OR code LIKE ?',
+        whereArgs: [q, q],
+        limit: 200,
+      );
+    }
+    return maps.map((m) => Song.fromMap(m)).toList();
+  }
+
+  static Future<List<String>> getDistinctValues(String column, String filter) async {
+    final db = await database;
+    final whereClause = filter.trim().isEmpty ? '$column != ""' : '$column LIKE ?';
+    final whereArgs = filter.trim().isEmpty ? null : ['%${filter.trim()}%'];
+    final res = await db.query(
+      'songs',
+      distinct: true,
+      columns: [column],
+      where: whereClause,
+      whereArgs: whereArgs,
+      orderBy: '$column ASC',
+      limit: 200,
+    );
+    return res.map((e) => e[column].toString()).where((s) => s.isNotEmpty).toList();
+  }
+}
 class KaraokeHomeScreen extends StatefulWidget {
   const KaraokeHomeScreen({super.key});
 
