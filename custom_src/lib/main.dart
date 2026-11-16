@@ -63,27 +63,32 @@ class DatabaseHelper {
     final q = '%${query.trim()}%';
     List<Map<String, dynamic>> maps;
     if (category == 'DISCO') {
-      maps = query.trim().isEmpty ? await db.query('songs', where: 'isDisco = 1', limit: limit, offset: offset) : await db.query('songs', where: 'isDisco = 1 AND (title LIKE ? OR artist LIKE ? OR code LIKE ?)', whereArgs: [q, q, q], limit: limit, offset: offset);
-    } else if (category == 'MYANMAR') {
-      maps = query.trim().isEmpty ? await db.query('songs', where: 'isDisco = 0', limit: limit, offset: offset) : await db.query('songs', where: 'isDisco = 0 AND (title LIKE ? OR artist LIKE ? OR code LIKE ?)', whereArgs: [q, q, q], limit: limit, offset: offset);
+      maps = query.trim().isEmpty
+          ? await db.query('songs', where: 'isDisco = 1', limit: limit, offset: offset)
+          : await db.query('songs', where: 'isDisco = 1 AND (title LIKE ? OR artist LIKE ? OR code LIKE ?)', whereArgs: [q, q, q], limit: limit, offset: offset);
     } else if (category == 'CODE') {
-      maps = query.trim().isEmpty ? await db.query('songs', orderBy: 'code ASC', limit: limit, offset: offset) : await db.query('songs', where: 'code LIKE ?', whereArgs: ['${query.trim()}%'], orderBy: 'code ASC', limit: limit, offset: offset);
+      maps = query.trim().isEmpty
+          ? await db.query('songs', where: 'isDisco = 0', orderBy: 'code ASC', limit: limit, offset: offset)
+          : await db.query('songs', where: 'isDisco = 0 AND code LIKE ?', whereArgs: ['${query.trim()}%'], orderBy: 'code ASC', limit: limit, offset: offset);
     } else if (category == 'ARTIST') {
-      maps = await db.query('songs', where: 'artist LIKE ? OR coArtist LIKE ?', whereArgs: [q, q], limit: limit, offset: offset);
+      maps = await db.query('songs', where: 'isDisco = 0 AND (artist LIKE ? OR coArtist LIKE ?)', whereArgs: [q, q], limit: limit, offset: offset);
     } else if (category == 'ALBUM') {
-      maps = await db.query('songs', where: 'album LIKE ?', whereArgs: [q], limit: limit, offset: offset);
+      maps = await db.query('songs', where: 'isDisco = 0 AND album LIKE ?', whereArgs: [q], limit: limit, offset: offset);
     } else {
-      maps = query.trim().isEmpty ? await db.query('songs', limit: limit, offset: offset) : await db.query('songs', where: 'title LIKE ? OR code LIKE ?', whereArgs: [q, q], limit: limit, offset: offset);
+      maps = query.trim().isEmpty
+          ? await db.query('songs', where: 'isDisco = 0', limit: limit, offset: offset)
+          : await db.query('songs', where: 'isDisco = 0 AND (title LIKE ? OR code LIKE ?)', whereArgs: [q, q], limit: limit, offset: offset);
     }
     return maps.map((m) => Song.fromMap(m)).toList();
   }
 
   static Future<List<String>> getDistinctValues(String col, String filter, {int offset = 0, int limit = 200}) async {
     final db = await database;
-    final res = await db.query('songs', distinct: true, columns: [col], where: filter.trim().isEmpty ? '$col != ""' : '$col LIKE ?', whereArgs: filter.trim().isEmpty ? null : ['%${filter.trim()}%'], orderBy: '$col ASC', limit: limit, offset: offset);
+    final whereClause = filter.trim().isEmpty ? 'isDisco = 0 AND $col != ""' : 'isDisco = 0 AND $col LIKE ?';
+    final whereArgs = filter.trim().isEmpty ? null : ['%${filter.trim()}%'];
+    final res = await db.query('songs', distinct: true, columns: [col], where: whereClause, whereArgs: whereArgs, orderBy: '$col ASC', limit: limit, offset: offset);
     return res.map((e) => e[col].toString()).where((s) => s.isNotEmpty).toList();
   }
-}
 
 List<Map<String, dynamic>> _parseCsvFromPath(String filePath, bool isDisco) {
   final lines = File(filePath).readAsLinesSync();
@@ -209,18 +214,42 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
       setState(() => _isSyncing = false);
     }
   }
-    Future<String?> _findVideoPath(String code) async {
-    for (final r in await _discoverStorageRoots()) {
-      for (final f in ['Myanmar_songs', 'Myanmar_New_Songs', 'DiscoVideo', '']) {
-        final dir = f.isEmpty ? r.path : p.join(r.path, f);
-        for (final ext in ['.mp4', '.mkv', '.dat', '.mpg', '.avi', '.MP4', '.MKV', '.DAT', '.MPG']) {
-          final file = File(p.join(dir, '$code$ext'));
-          if (await file.exists()) return file.path;
+     final Map<String, String> _videoIndex = {};
+
+  Future<void> _indexAllVideos() async {
+    if (_videoIndex.isNotEmpty) return;
+    final roots = await _discoverStorageRoots();
+    final mntDir = Directory('/mnt/media_rw');
+    if (await mntDir.exists()) {
+      try {
+        await for (final e in mntDir.list()) {
+          if (e is Directory) roots.add(e);
         }
-      }
+      } catch (_) {}
     }
-    return null;
+    const exts = {'.mp4', '.mkv', '.dat', '.mpg', '.avi'};
+    for (final r in roots) {
+      if (r.path == '/storage/emulated/0') continue;
+      try {
+        await for (final entity in r.list(recursive: true, followLinks: false)) {
+          if (entity is File) {
+            final ext = p.extension(entity.path).toLowerCase();
+            if (exts.contains(ext)) {
+              final base = p.basenameWithoutExtension(entity.path).toLowerCase();
+              _videoIndex[base] = entity.path;
+            }
+          }
+        }
+      } catch (_) {}
+    }
   }
+
+  Future<String?> _findVideoPath(String code) async {
+    await _indexAllVideos();
+    final c = code.trim().toLowerCase();
+    return _videoIndex[c] ?? _videoIndex['a$c'] ?? _videoIndex['d$c'] ?? _videoIndex['m$c'];
+  }
+
 
   Future<void> _addToQueue(Song song, {bool playNow = false}) async {
     if (playNow) { await _startPlayingSong(song); return; }
