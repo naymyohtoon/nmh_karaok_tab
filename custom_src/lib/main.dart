@@ -300,8 +300,7 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
       setState(() { _searchResults = l; _hasMore = l.length == 200; });
     }
   }
-    @override
-  Wi  @override
+  @override
   Widget build(BuildContext context) {
     final kbHeight = MediaQuery.of(context).viewInsets.bottom;
     final isKbOpen = kbHeight > 50;
