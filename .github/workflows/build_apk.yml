@@ -22,7 +22,7 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Setup Project & Permissions
+      - name: Setup Project & Fix Kotlin
         run: |
           flutter create --org com.nmh.karaoke --project-name nmh_karaok_tab .
           mkdir -p assets android/app/src/main/kotlin/com/nmh/karaoke
@@ -30,6 +30,7 @@ jobs:
           cp custom_src/pubspec.yaml pubspec.yaml
           cp custom_src/android/app/src/main/kotlin/com/nmh/karaoke/MainActivity.kt android/app/src/main/kotlin/com/nmh/karaoke/MainActivity.kt
           cp custom_src/lib/main.dart lib/main.dart
+          sed -i 's/setContentView(layout)/setContentView(layout as android.view.View)/g' android/app/src/main/kotlin/com/nmh/karaoke/MainActivity.kt
           sed -i 's/<application/<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"\/><uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"\/><uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"\/><application android:requestLegacyExternalStorage="true"/g' android/app/src/main/AndroidManifest.xml
           flutter pub get
 
