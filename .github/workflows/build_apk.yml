@@ -24,13 +24,75 @@ jobs:
       - name: Initialize Flutter Project
         run: |
           flutter create --org com.nmh.karaoke --project-name nmh_karaok_tab .
-          
-      - name: Setup Dependencies and Permissions
+
+      - name: Write pubspec.yaml
         run: |
-          cp -r custom_src/lib/* lib/ || true
-          cp -r custom_src/android/* android/ || true
-          if [ -f custom_src/pubspec.yaml ]; then cp custom_src/pubspec.yaml pubspec.yaml; fi
+          cat << 'EOF' > pubspec.yaml
+          name: nmh_karaok_tab
+          description: NMH Standalone Offline Dual Screen Karaoke System
+          publish_to: 'none'
+          version: 1.0.0+1
+          environment:
+            sdk: '>=3.2.0 <4.0.0'
+          dependencies:
+            flutter:
+              sdk: flutter
+            excel: ^4.0.6
+            sqflite: ^2.3.3
+            path: ^1.9.0
+            path_provider: ^2.1.4
+            permission_handler: ^11.3.1
+          dev_dependencies:
+            flutter_test:
+              sdk: flutter
+            flutter_lints: ^3.0.0
+          flutter:
+            uses-material-design: true
+          EOF
           flutter pub get
+
+      - name: Write AndroidManifest.xml
+        run: |
+          cat << 'EOF' > android/app/src/main/AndroidManifest.xml
+          <manifest xmlns:android="http://android.com">
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+              <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.BLUETOOTH" />
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+              <application
+                  android:label="NMH Karaoke"
+                  android:name="${applicationName}"
+                  android:icon="@mipmap/ic_launcher"
+                  android:requestLegacyExternalStorage="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop"
+                      android:theme="@style/LaunchTheme"
+                      android:screenOrientation="sensorLandscape"
+                      android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+                      android:hardwareAccelerated="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <meta-data
+                        android:name="io.flutter.embedding.android.NormalTheme"
+                        android:resource="@style/NormalTheme" />
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <meta-data android:name="flutterEmbedding" android:value="2" />
+              </application>
+          </manifest>
+          EOF
+
+      - name: Copy Kotlin and Dart Source
+        run: |
+          mkdir -p android/app/src/main/kotlin/com/nmh/karaoke
+          cp custom_src/android/app/src/main/kotlin/com/nmh/karaoke/MainActivity.kt android/app/src/main/kotlin/com/nmh/karaoke/MainActivity.kt
+          cp custom_src/lib/main.dart lib/main.dart
 
       - name: Build Release APK
         run: flutter build apk --release
