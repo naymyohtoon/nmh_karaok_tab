@@ -25,6 +25,10 @@ jobs:
       - name: Setup Project & Fix Kotlin
         run: |
           flutter create --org com.nmh.karaoke --project-name nmh_karaok_tab .
+          sed -i 's/1.7.10/1.9.24/g' android/settings.gradle || true
+          sed -i 's/1.8.22/1.9.24/g' android/settings.gradle || true
+          sed -i 's/1.7.10/1.9.24/g' android/build.gradle || true
+          sed -i 's/1.8.22/1.9.24/g' android/build.gradle || true
           mkdir -p assets android/app/src/main/kotlin/com/nmh/karaoke
           cp image_afebac29.jpg assets/logo.jpg || true
           cp custom_src/pubspec.yaml pubspec.yaml
