@@ -108,7 +108,7 @@ class MainActivity : FlutterActivity() {
         val displays = dm.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
         if (displays.isNotEmpty()) {
             if (tvPresentation == null) {
-                tvPresentation = TvPresentation(this, displays) { sv -> exoPlayer?.setVideoSurfaceView(sv) }
+                tvPresentation = TvPresentation(this, displays.first() { sv -> exoPlayer?.setVideoSurfaceView(sv) }
                 tvPresentation?.show()
             }
             methodChannel?.invokeMethod("onDisplayChanged", true)
