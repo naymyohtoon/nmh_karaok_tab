@@ -1,4 +1,4 @@
-name: Build NMH Karaoke APK
+name: Build NMH Karaoke APK v2
 
 on:
   push:
@@ -27,6 +27,8 @@ jobs:
           sed -i 's/1.7.10/1.9.22/g' android/settings.gradle || true
           sed -i 's/1.8.22/1.9.22/g' android/settings.gradle || true
           sed -i 's/1.7.10/1.9.22/g' android/build.gradle || true
+          mkdir -p assets
+          if [ -f image_afebac29.jpg ]; then cp image_afebac29.jpg assets/logo.jpg; fi
 
       - name: Write pubspec.yaml
         run: |
@@ -34,9 +36,11 @@ jobs:
           name: nmh_karaok_tab
           description: NMH Standalone Offline Dual Screen Karaoke System
           publish_to: 'none'
-          version: 1.0.0+1
+          version: 2.0.0+2
+
           environment:
             sdk: '>=3.2.0 <4.0.0'
+
           dependencies:
             flutter:
               sdk: flutter
@@ -45,12 +49,16 @@ jobs:
             path: ^1.9.0
             path_provider: ^2.1.4
             permission_handler: ^11.3.1
+
           dev_dependencies:
             flutter_test:
               sdk: flutter
             flutter_lints: ^3.0.0
+
           flutter:
             uses-material-design: true
+            assets:
+              - assets/
           EOF
           flutter pub get
 
@@ -64,6 +72,7 @@ jobs:
               <uses-permission android:name="android.permission.WAKE_LOCK" />
               <uses-permission android:name="android.permission.BLUETOOTH" />
               <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
               <application
                   android:label="NMH Karaoke"
                   android:name="${applicationName}"
@@ -91,7 +100,7 @@ jobs:
           </manifest>
           EOF
 
-      - name: Write MainActivity.kt
+      - name: Write MainActivity.kt (Dual Screen + Tablet Video + Voice Control)
         run: |
           mkdir -p android/app/src/main/kotlin/com/nmh/karaoke
           cat << 'EOF' > android/app/src/main/kotlin/com/nmh/karaoke/MainActivity.kt
@@ -99,17 +108,22 @@ jobs:
 
           import android.app.Presentation
           import android.content.Context
+          import android.graphics.Color
           import android.hardware.display.DisplayManager
           import android.media.MediaPlayer
           import android.os.Bundle
           import android.view.Display
           import android.view.SurfaceHolder
           import android.view.SurfaceView
+          import android.view.View
           import android.view.WindowManager
           import android.widget.FrameLayout
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
+          import io.flutter.plugin.common.StandardMessageCodec
+          import io.flutter.plugin.platform.PlatformView
+          import io.flutter.plugin.platform.PlatformViewFactory
           import java.io.File
 
           class MainActivity : FlutterActivity() {
@@ -119,6 +133,7 @@ jobs:
               private var mediaPlayer: MediaPlayer? = null
               private var currentVoiceMode = "STEREO"
               private var methodChannel: MethodChannel? = null
+              private var localSurfaceHolder: SurfaceHolder? = null
 
               private val displayListener = object : DisplayManager.DisplayListener {
                   override fun onDisplayAdded(displayId: Int) {
@@ -127,6 +142,7 @@ jobs:
                   override fun onDisplayRemoved(displayId: Int) {
                       presentation?.dismiss()
                       presentation = null
+                      attachActiveSurface()
                       notifyDisplayStatus(false)
                   }
                   override fun onDisplayChanged(displayId: Int) {}
@@ -135,6 +151,15 @@ jobs:
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
                   super.configureFlutterEngine(flutterEngine)
                   window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+                  flutterEngine.platformViewsController.registry.registerViewFactory(
+                      "nmh_video_surface",
+                      object : PlatformViewFactory(StandardMessageCodec.INSTANCE) {
+                          override fun create(context: Context, viewId: Int, args: Any?): PlatformView {
+                              return LocalVideoView(context)
+                          }
+                      }
+                  )
 
                   displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
                   displayManager?.registerDisplayListener(displayListener, null)
@@ -149,19 +174,20 @@ jobs:
                           "playVideo" -> {
                               val path = call.argument<String>("path")
                               if (path != null) {
-                                  playVideoOnTv(path)
+                                  playVideo(path)
                                   result.success(true)
                               } else {
                                   result.error("INVALID_PATH", "Video path is null", null)
                               }
                           }
                           "pauseResume" -> {
-                              val isPlaying = togglePauseResume()
-                              result.success(isPlaying)
+                              result.success(togglePauseResume())
                           }
                           "replay" -> {
-                              mediaPlayer?.seekTo(0)
-                              mediaPlayer?.start()
+                              try {
+                                  mediaPlayer?.seekTo(0)
+                                  mediaPlayer?.start()
+                              } catch (_: Exception) {}
                               result.success(true)
                           }
                           "stop" -> {
@@ -193,14 +219,33 @@ jobs:
                           presentation = KaraokePresentation(this, tvDisplay)
                           presentation?.show()
                       }
+                      attachActiveSurface()
                       notifyDisplayStatus(true)
                       return true
                   }
+                  attachActiveSurface()
                   notifyDisplayStatus(false)
                   return false
               }
 
-              private fun playVideoOnTv(filePath: String) {
+              private fun attachActiveSurface() {
+                  val mp = mediaPlayer ?: return
+                  try {
+                      val tvHolder = presentation?.surfaceView?.holder
+                      if (tvHolder != null && tvHolder.surface.isValid) {
+                          mp.setDisplay(tvHolder)
+                          return
+                      }
+                      val localHolder = localSurfaceHolder
+                      if (localHolder != null && localHolder.surface.isValid) {
+                          mp.setDisplay(localHolder)
+                          return
+                      }
+                      mp.setDisplay(null)
+                  } catch (_: Exception) {}
+              }
+
+              private fun playVideo(filePath: String) {
                   setupSecondaryDisplay()
                   val file = File(filePath)
                   if (!file.exists()) return
@@ -209,12 +254,8 @@ jobs:
                       mediaPlayer?.release()
                       mediaPlayer = MediaPlayer().apply {
                           setDataSource(filePath)
-                          presentation?.surfaceView?.holder?.let { holder ->
-                              if (holder.surface.isValid) {
-                                  setDisplay(holder)
-                              }
-                          }
                           setOnPreparedListener { mp ->
+                              attachActiveSurface()
                               applyVoiceMode(currentVoiceMode)
                               mp.start()
                           }
@@ -232,12 +273,16 @@ jobs:
 
               private fun togglePauseResume(): Boolean {
                   val mp = mediaPlayer ?: return false
-                  return if (mp.isPlaying) {
-                      mp.pause()
+                  return try {
+                      if (mp.isPlaying) {
+                          mp.pause()
+                          false
+                      } else {
+                          mp.start()
+                          true
+                      }
+                  } catch (_: Exception) {
                       false
-                  } else {
-                      mp.start()
-                      true
                   }
               }
 
@@ -246,9 +291,7 @@ jobs:
                       mediaPlayer?.stop()
                       mediaPlayer?.release()
                       mediaPlayer = null
-                  } catch (e: Exception) {
-                      e.printStackTrace()
-                  }
+                  } catch (_: Exception) {}
               }
 
               private fun applyVoiceMode(mode: String) {
@@ -262,7 +305,6 @@ jobs:
                               audioTracks.add(i)
                           }
                       }
-
                       when (mode) {
                           "STEREO" -> {
                               if (audioTracks.isNotEmpty()) mp.selectTrack(audioTracks[0])
@@ -285,9 +327,7 @@ jobs:
                               mp.setVolume(1.0f, 1.0f)
                           }
                       }
-                  } catch (e: Exception) {
-                      e.printStackTrace()
-                  }
+                  } catch (_: Exception) {}
               }
 
               override fun onDestroy() {
@@ -297,22 +337,45 @@ jobs:
                   super.onDestroy()
               }
 
+              inner class LocalVideoView(context: Context) : PlatformView {
+                  private val surfaceView = SurfaceView(context)
+
+                  init {
+                      surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
+                          override fun surfaceCreated(holder: SurfaceHolder) {
+                              localSurfaceHolder = holder
+                              attachActiveSurface()
+                          }
+                          override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+                          override fun surfaceDestroyed(holder: SurfaceHolder) {
+                              if (localSurfaceHolder == holder) {
+                                  localSurfaceHolder = null
+                              }
+                              attachActiveSurface()
+                          }
+                      })
+                  }
+
+                  override fun getView(): View = surfaceView
+                  override fun dispose() {}
+              }
+
               inner class KaraokePresentation(context: Context, display: Display) : Presentation(context, display) {
                   lateinit var surfaceView: SurfaceView
 
                   override fun onCreate(savedInstanceState: Bundle?) {
                       super.onCreate(savedInstanceState)
                       val layout = FrameLayout(context).apply {
-                          setBackgroundColor(android.graphics.Color.BLACK)
+                          setBackgroundColor(Color.BLACK)
                       }
                       surfaceView = SurfaceView(context)
                       surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
                           override fun surfaceCreated(holder: SurfaceHolder) {
-                              mediaPlayer?.setDisplay(holder)
+                              attachActiveSurface()
                           }
                           override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
                           override fun surfaceDestroyed(holder: SurfaceHolder) {
-                              mediaPlayer?.setDisplay(null)
+                              attachActiveSurface()
                           }
                       })
                       layout.addView(surfaceView, FrameLayout.LayoutParams(
@@ -325,11 +388,12 @@ jobs:
           }
           EOF
 
-      - name: Write Clean main.dart
+      - name: Write main.dart (NMH Remote Style UI + Background Excel Isolate + Tablet Video)
         run: |
           cat << 'EOF' > lib/main.dart
           import 'dart:io';
           import 'package:excel/excel.dart' as xls;
+          import 'package:flutter/foundation.dart';
           import 'package:flutter/material.dart';
           import 'package:flutter/services.dart';
           import 'package:path/path.dart' as p;
@@ -347,14 +411,19 @@ jobs:
 
           class NMHKaraokeApp extends StatelessWidget {
             const NMHKaraokeApp({super.key});
+
             @override
             Widget build(BuildContext context) {
               return MaterialApp(
                 title: 'NMH Karaoke',
                 debugShowCheckedModeBanner: false,
                 theme: ThemeData.dark().copyWith(
-                  scaffoldBackgroundColor: const Color(0xFF0D1117),
-                  primaryColor: const Color(0xFFFF9800),
+                  scaffoldBackgroundColor: const Color(0xFF0A0E1A),
+                  primaryColor: const Color(0xFFFFB300),
+                  colorScheme: const ColorScheme.dark(
+                    primary: Color(0xFFFFB300),
+                    secondary: Color(0xFF00E5FF),
+                  ),
                 ),
                 home: const KaraokeHomeScreen(),
               );
@@ -362,75 +431,207 @@ jobs:
           }
 
           class Song {
-            final String code, title, artist, coArtist, album;
+            final String code;
+            final String title;
+            final String artist;
+            final String coArtist;
+            final String album;
             final bool isDisco;
-            Song({required this.code, required this.title, required this.artist, required this.coArtist, required this.album, this.isDisco = false});
-            Map<String, dynamic> toMap() => {'code': code, 'title': title, 'artist': artist, 'coArtist': coArtist, 'album': album, 'isDisco': isDisco ? 1 : 0};
-            factory Song.fromMap(Map<String, dynamic> m) => Song(code: m['code'] ?? '', title: m['title'] ?? '', artist: m['artist'] ?? '', coArtist: m['coArtist'] ?? '', album: m['album'] ?? '', isDisco: (m['isDisco'] ?? 0) == 1);
+
+            Song({
+              required this.code,
+              required this.title,
+              required this.artist,
+              required this.coArtist,
+              required this.album,
+              this.isDisco = false,
+            });
+
+            Map<String, dynamic> toMap() => {
+                  'code': code,
+                  'title': title,
+                  'artist': artist,
+                  'coArtist': coArtist,
+                  'album': album,
+                  'isDisco': isDisco ? 1 : 0,
+                };
+
+            factory Song.fromMap(Map<String, dynamic> m) => Song(
+                  code: m['code'] ?? '',
+                  title: m['title'] ?? '',
+                  artist: m['artist'] ?? '',
+                  coArtist: m['coArtist'] ?? '',
+                  album: m['album'] ?? '',
+                  isDisco: (m['isDisco'] ?? 0) == 1,
+                );
+          }
+
+          // Background Isolate parser so large Excel files never freeze the UI
+          List<Map<String, dynamic>> parseExcelInIsolate(Map<String, dynamic> params) {
+            final Uint8List bytes = params['bytes'];
+            final bool isDisco = params['isDisco'];
+            final excel = xls.Excel.decodeBytes(bytes);
+            final List<Map<String, dynamic>> result = [];
+
+            for (final table in excel.tables.keys) {
+              final sheet = excel.tables[table];
+              if (sheet == null) continue;
+              for (int i = 1; i < sheet.rows.length; i++) {
+                final row = sheet.rows[i];
+                if (row.isEmpty) continue;
+                String cell(int idx) {
+                  if (idx >= row.length || row[idx] == null || row[idx]?.value == null) return '';
+                  return row[idx]!.value.toString().trim();
+                }
+                final code = cell(0);
+                final title = cell(1);
+                if (code.isNotEmpty && title.isNotEmpty) {
+                  result.add({
+                    'code': code,
+                    'title': title,
+                    'artist': cell(2),
+                    'coArtist': cell(3),
+                    'album': cell(4),
+                    'isDisco': isDisco ? 1 : 0,
+                  });
+                }
+              }
+            }
+            return result;
           }
 
           class DatabaseHelper {
             static Database? _db;
+
             static Future<Database> get database async {
               if (_db != null) return _db!;
-              _db = await openDatabase(p.join(await getDatabasesPath(), 'nmh_karaoke.db'), version: 1, onCreate: (db, v) async {
-                await db.execute('CREATE TABLE songs(code TEXT PRIMARY KEY, title TEXT, artist TEXT, coArtist TEXT, album TEXT, isDisco INTEGER)');
-                await db.execute('CREATE INDEX idx_title ON songs(title)');
-                await db.execute('CREATE INDEX idx_artist ON songs(artist)');
-                await db.execute('CREATE INDEX idx_album ON songs(album)');
-              });
+              final dbPath = await getDatabasesPath();
+              _db = await openDatabase(
+                p.join(dbPath, 'nmh_karaoke_v2.db'),
+                version: 1,
+                onCreate: (db, v) async {
+                  await db.execute('''
+                    CREATE TABLE songs(
+                      code TEXT PRIMARY KEY,
+                      title TEXT,
+                      artist TEXT,
+                      coArtist TEXT,
+                      album TEXT,
+                      isDisco INTEGER
+                    )
+                  ''');
+                  await db.execute('CREATE INDEX idx_title ON songs(title)');
+                  await db.execute('CREATE INDEX idx_artist ON songs(artist)');
+                  await db.execute('CREATE INDEX idx_album ON songs(album)');
+                },
+              );
               return _db!;
             }
-            static Future<void> clearAndInsertSongs(List<Song> songs) async {
+
+            static Future<void> replaceAllSongs(List<Map<String, dynamic>> maps) async {
               final db = await database;
               await db.transaction((txn) async {
                 await txn.delete('songs');
                 final batch = txn.batch();
-                for (final s in songs) { batch.insert('songs', s.toMap(), conflictAlgorithm: ConflictAlgorithm.replace); }
+                for (final m in maps) {
+                  batch.insert('songs', m, conflictAlgorithm: ConflictAlgorithm.replace);
+                }
                 await batch.commit(noResult: true);
               });
             }
-            static Future<int> getSongCount() async => Sqflite.firstIntValue(await (await database).rawQuery('SELECT COUNT(*) FROM songs')) ?? 0;
-            static Future<List<Song>> searchSongs({String query = '', String category = 'TITLE'}) async {
+
+            static Future<int> getSongCount() async {
+              final db = await database;
+              final res = await db.rawQuery('SELECT COUNT(*) FROM songs');
+              return Sqflite.firstIntValue(res) ?? 0;
+            }
+
+            static Future<List<Song>> searchSongs({
+              String query = '',
+              String category = 'TITLE',
+              String? exactGroup,
+            }) async {
               final db = await database;
               final q = '%${query.trim()}%';
               List<Map<String, dynamic>> maps;
-              if (category == 'DISCO') {
+
+              if (exactGroup != null && exactGroup.isNotEmpty) {
+                if (category == 'ARTIST') {
+                  maps = await db.query(
+                    'songs',
+                    where: '(artist = ? OR coArtist = ?) AND (title LIKE ? OR code LIKE ?)',
+                    whereArgs: [exactGroup, exactGroup, q, q],
+                    limit: 300,
+                  );
+                } else {
+                  maps = await db.query(
+                    'songs',
+                    where: 'album = ? AND (title LIKE ? OR code LIKE ?)',
+                    whereArgs: [exactGroup, q, q],
+                    limit: 300,
+                  );
+                }
+              } else if (category == 'DISCO') {
                 maps = query.trim().isEmpty
-                    ? await db.query('songs', where: 'isDisco = 1', limit: 200)
-                    : await db.query('songs', where: 'isDisco = 1 AND (title LIKE ? OR artist LIKE ? OR code LIKE ?)', whereArgs: [q, q, q], limit: 200);
+                    ? await db.query('songs', where: 'isDisco = 1', limit: 250)
+                    : await db.query('songs',
+                        where: 'isDisco = 1 AND (title LIKE ? OR artist LIKE ? OR code LIKE ?)',
+                        whereArgs: [q, q, q],
+                        limit: 250);
               } else if (category == 'CODE') {
-                maps = await db.query('songs', where: 'code LIKE ?', whereArgs: ['${query.trim()}%'], limit: 100);
+                maps = await db.query('songs',
+                    where: 'code LIKE ?', whereArgs: ['${query.trim()}%'], limit: 150);
               } else if (category == 'ARTIST') {
-                maps = await db.query('songs', where: 'artist LIKE ? OR coArtist LIKE ?', whereArgs: [q, q], limit: 200);
+                maps = await db.query('songs',
+                    where: 'artist LIKE ? OR coArtist LIKE ?', whereArgs: [q, q], limit: 250);
               } else if (category == 'ALBUM') {
-                maps = await db.query('songs', where: 'album LIKE ?', whereArgs: [q], limit: 200);
+                maps = await db.query('songs', where: 'album LIKE ?', whereArgs: [q], limit: 250);
               } else {
-                maps = await db.query('songs', where: 'title LIKE ? OR code LIKE ?', whereArgs: [q, q], limit: 200);
+                maps = await db.query('songs',
+                    where: 'title LIKE ? OR artist LIKE ? OR code LIKE ?',
+                    whereArgs: [q, q, q],
+                    limit: 250);
               }
               return maps.map((m) => Song.fromMap(m)).toList();
             }
-            static Future<List<String>> getDistinctValues(String col, String filter) async {
+
+            static Future<List<String>> getDistinctGroups(String col, String filter) async {
               final db = await database;
-              final res = await db.query('songs', distinct: true, columns: [col], where: filter.trim().isEmpty ? '$col != ""' : '$col LIKE ?', whereArgs: filter.trim().isEmpty ? null : ['%${filter.trim()}%'], orderBy: '$col ASC', limit: 200);
+              final res = await db.query(
+                'songs',
+                distinct: true,
+                columns: [col],
+                where: filter.trim().isEmpty ? '$col != ""' : '$col LIKE ?',
+                whereArgs: filter.trim().isEmpty ? null : ['%${filter.trim()}%'],
+                orderBy: '$col ASC',
+                limit: 300,
+              );
               return res.map((e) => e[col].toString()).where((s) => s.isNotEmpty).toList();
             }
           }
 
           class KaraokeHomeScreen extends StatefulWidget {
             const KaraokeHomeScreen({super.key});
+
             @override
             State<KaraokeHomeScreen> createState() => _KaraokeHomeScreenState();
           }
 
           class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
             static const platform = MethodChannel('com.nmh.karaoke/player');
+
             final List<Song> _queue = [];
+            final List<Song> _history = [];
             Song? _currentSong;
-            bool _isTvConnected = false, _isPlaying = false, _isSyncing = false;
-            String _voiceMode = 'STEREO', _activeView = 'HOME';
-            String? _selectedSubGroup;
+            bool _isTvConnected = false;
+            bool _isPlaying = false;
+            bool _isSyncing = false;
+            bool _isTabletFullscreen = false;
+            String _voiceMode = 'STEREO';
+            String _activeView = 'HOME';
+            String? _selectedGroup;
             int _totalSongs = 0;
+
             final TextEditingController _searchController = TextEditingController();
             List<Song> _searchResults = [];
             List<String> _groupResults = [];
@@ -439,41 +640,58 @@ jobs:
             void initState() {
               super.initState();
               platform.setMethodCallHandler((call) async {
-                if (call.method == 'onDisplayChanged') setState(() => _isTvConnected = call.arguments == true);
-                if (call.method == 'onSongCompleted') _playNextSong();
+                if (call.method == 'onDisplayChanged') {
+                  if (mounted) {
+                    setState(() {
+                      _isTvConnected = call.arguments == true;
+                      if (_isTvConnected) _isTabletFullscreen = false;
+                    });
+                  }
+                } else if (call.method == 'onSongCompleted') {
+                  _playNextSong();
+                }
               });
-              _checkTvDisplay();
-              _initStorageAndDb();
+              _initApp();
             }
 
-            Future<void> _checkTvDisplay() async {
+            Future<void> _initApp() async {
               try {
-                final bool c = await platform.invokeMethod('checkDisplay');
-                setState(() => _isTvConnected = c);
+                await Permission.storage.request();
+                await Permission.manageExternalStorage.request();
               } catch (_) {}
-            }
 
-            Future<void> _initStorageAndDb() async {
-              await Permission.storage.request();
-              await Permission.manageExternalStorage.request();
+              try {
+                final bool connected = await platform.invokeMethod('checkDisplay');
+                if (mounted) setState(() => _isTvConnected = connected);
+              } catch (_) {}
+
               final count = await DatabaseHelper.getSongCount();
-              setState(() => _totalSongs = count);
-              if (count == 0) await _syncExcelData();
+              if (mounted) setState(() => _totalSongs = count);
+              if (count == 0) {
+                Future.delayed(const Duration(milliseconds: 500), _syncExcelData);
+              }
             }
 
             Future<List<Directory>> _discoverStorageRoots() async {
               final List<Directory> roots = [];
-              for (final path in ['/storage/emulated/0', '/storage/emulated/0/NMH_Karaoke', '/storage/sdcard1', '/storage/sdcard1/NMH_Karaoke']) {
+              for (final path in [
+                '/storage/emulated/0',
+                '/storage/emulated/0/NMH_Karaoke',
+                '/storage/sdcard1',
+                '/storage/sdcard1/NMH_Karaoke',
+              ]) {
                 final d = Directory(path);
                 if (await d.exists()) roots.add(d);
               }
               try {
-                final s = Directory('/storage');
-                if (await s.exists()) {
-                  await for (final e in s.list()) {
-                    if (e is Directory && !e.path.contains('emulated') && !e.path.contains('self')) {
-                      roots.add(e);
-                      final sub = Directory('${e.path}/NMH_Karaoke');
+                final storageDir = Directory('/storage');
+                if (await storageDir.exists()) {
+                  await for (final entity in storageDir.list()) {
+                    if (entity is Directory &&
+                        !entity.path.contains('emulated') &&
+                        !entity.path.contains('self')) {
+                      roots.add(entity);
+                      final sub = Directory('${entity.path}/NMH_Karaoke');
                       if (await sub.exists()) roots.add(sub);
                     }
                   }
@@ -483,53 +701,47 @@ jobs:
             }
 
             Future<void> _syncExcelData() async {
+              if (_isSyncing) return;
               setState(() => _isSyncing = true);
               try {
                 final roots = await _discoverStorageRoots();
-                final List<Song> loaded = [];
+                final List<Map<String, dynamic>> allMaps = [];
+
                 for (final r in roots) {
                   final q2 = File(p.join(r.path, 'q2.xlsx'));
-                  if (await q2.exists()) loaded.addAll(await _parseExcel(q2, false));
-                  final dc = File(p.join(r.path, 'disco.xlsx'));
-                  if (await dc.exists()) loaded.addAll(await _parseExcel(dc, true));
-                }
-                if (loaded.isNotEmpty) {
-                  await DatabaseHelper.clearAndInsertSongs(loaded);
-                  final count = await DatabaseHelper.getSongCount();
-                  setState(() => _totalSongs = count);
-                  _showSnack('သီချင်းပေါင်း $count ပုဒ် ဖတ်သွင်းပြီးပါပြီ။');
-                } else {
-                  _showSnack('q2.xlsx / disco.xlsx မတွေ့ပါ။');
-                }
-              } catch (e) {
-                _showSnack('Excel Error: $e');
-              } finally {
-                setState(() => _isSyncing = false);
-              }
-            }
-
-            Future<List<Song>> _parseExcel(File file, bool isDisco) async {
-              final excel = xls.Excel.decodeBytes(await file.readAsBytes());
-              final List<Song> songs = [];
-              for (final t in excel.tables.keys) {
-                final sheet = excel.tables[t];
-                if (sheet == null) continue;
-                for (int i = 1; i < sheet.rows.length; i++) {
-                  final row = sheet.rows[i];
-                  String cell(int idx) => (idx < row.length && row[idx]?.value != null) ? row[idx]!.value.toString().trim() : '';
-                  if (cell(0).isNotEmpty && cell(1).isNotEmpty) {
-                    songs.add(Song(code: cell(0), title: cell(1), artist: cell(2), coArtist: cell(3), album: cell(4), isDisco: isDisco));
+                  if (await q2.exists()) {
+                    final bytes = await q2.readAsBytes();
+                    final parsed = await compute(parseExcelInIsolate, {'bytes': bytes, 'isDisco': false});
+                    allMaps.addAll(parsed);
+                  }
+                  final disco = File(p.join(r.path, 'disco.xlsx'));
+                  if (await disco.exists()) {
+                    final bytes = await disco.readAsBytes();
+                    final parsed = await compute(parseExcelInIsolate, {'bytes': bytes, 'isDisco': true});
+                    allMaps.addAll(parsed);
                   }
                 }
+
+                if (allMaps.isNotEmpty) {
+                  await DatabaseHelper.replaceAllSongs(allMaps);
+                  final count = await DatabaseHelper.getSongCount();
+                  if (mounted) setState(() => _totalSongs = count);
+                  _showSnack('သီချင်းပေါင်း $count ပုဒ် ဖတ်သွင်းပြီးပါပြီ။');
+                } else {
+                  _showSnack('q2.xlsx / disco.xlsx ဖိုင် မတွေ့ပါ (Storage အပြင်ဆုံးတွင် ထည့်ပါ)။');
+                }
+              } catch (e) {
+                _showSnack('Excel ဖတ်ရာတွင် အမှားဖြစ်ပါသည်: $e');
+              } finally {
+                if (mounted) setState(() => _isSyncing = false);
               }
-              return songs;
             }
 
             Future<String?> _findVideoPath(String code) async {
               final roots = await _discoverStorageRoots();
               for (final r in roots) {
-                for (final f in ['Myanmar_songs', 'Myanmar_New_Songs', 'DiscoVideo', '']) {
-                  final dir = f.isEmpty ? r.path : p.join(r.path, f);
+                for (final folder in ['Myanmar_songs', 'Myanmar_New_Songs', 'DiscoVideo', '']) {
+                  final dir = folder.isEmpty ? r.path : p.join(r.path, folder);
                   for (final ext in ['.mp4', '.mkv', '.dat', '.mpg', '.avi', '.MP4', '.MKV', '.DAT', '.MPG']) {
                     final file = File(p.join(dir, '$code$ext'));
                     if (await file.exists()) return file.path;
@@ -540,22 +752,43 @@ jobs:
             }
 
             Future<void> _addToQueue(Song song, {bool playNow = false}) async {
-              if (playNow) { await _startPlayingSong(song); return; }
+              if (playNow) {
+                await _startPlayingSong(song);
+                return;
+              }
               setState(() => _queue.add(song));
-              _showSnack('ရွေးချယ်ပြီး: ${song.title}');
-              if (_currentSong == null) _playNextSong();
+              _showSnack('တန်းစီပြီး: ${song.title} (${song.code})');
+              if (_currentSong == null) {
+                _playNextSong();
+              }
             }
 
             Future<void> _startPlayingSong(Song song) async {
               final path = await _findVideoPath(song.code);
-              if (path == null) { _showSnack('ဗီဒီယိုဖိုင် (${song.code}) မတွေ့ပါ။'); return; }
-              setState(() { _currentSong = song; _isPlaying = true; });
-              await platform.invokeMethod('playVideo', {'path': path});
+              if (path == null) {
+                _showSnack('ဗီဒီယိုဖိုင် (${song.code}) ကို Myanmar_songs / Myanmar_New_Songs / DiscoVideo ထဲတွင် မတွေ့ပါ။');
+                return;
+              }
+              setState(() {
+                _currentSong = song;
+                _isPlaying = true;
+                _history.removeWhere((s) => s.code == song.code);
+                _history.insert(0, song);
+              });
+              try {
+                await platform.invokeMethod('playVideo', {'path': path});
+              } catch (e) {
+                _showSnack('ဗီဒီယိုဖွင့်ရာတွင် အမှားဖြစ်ပါသည်: $e');
+              }
             }
 
             Future<void> _playNextSong() async {
               if (_queue.isEmpty) {
-                setState(() { _currentSong = null; _isPlaying = false; });
+                setState(() {
+                  _currentSong = null;
+                  _isPlaying = false;
+                  _isTabletFullscreen = false;
+                });
                 await platform.invokeMethod('stop');
                 return;
               }
@@ -574,17 +807,31 @@ jobs:
             void _showSnack(String msg) {
               if (!mounted) return;
               ScaffoldMessenger.of(context).hideCurrentSnackBar();
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), duration: const Duration(seconds: 2)));
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(msg, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                  backgroundColor: const Color(0xFF1E293B),
+                  duration: const Duration(seconds: 2),
+                ),
+              );
             }
 
             void _openCategory(String cat) async {
               _searchController.clear();
-              setState(() { _activeView = cat; _selectedSubGroup = null; _searchResults = []; _groupResults = []; });
-              if (cat == 'ARTIST') {
-                final l = await DatabaseHelper.getDistinctValues('artist', '');
+              setState(() {
+                _activeView = cat;
+                _selectedGroup = null;
+                _searchResults = [];
+                _groupResults = [];
+              });
+
+              if (cat == 'HISTORY') {
+                setState(() => _searchResults = List.from(_history));
+              } else if (cat == 'ARTIST') {
+                final l = await DatabaseHelper.getDistinctGroups('artist', '');
                 setState(() => _groupResults = l);
               } else if (cat == 'ALBUM') {
-                final l = await DatabaseHelper.getDistinctValues('album', '');
+                final l = await DatabaseHelper.getDistinctGroups('album', '');
                 setState(() => _groupResults = l);
               } else {
                 final l = await DatabaseHelper.searchSongs(query: '', category: cat);
@@ -593,14 +840,26 @@ jobs:
             }
 
             void _onSearchChanged(String val) async {
-              if (_activeView == 'ARTIST' && _selectedSubGroup == null) {
-                final l = await DatabaseHelper.getDistinctValues('artist', val);
+              if (_activeView == 'HISTORY') {
+                setState(() {
+                  _searchResults = _history
+                      .where((s) => s.title.toLowerCase().contains(val.toLowerCase()) || s.code.contains(val))
+                      .toList();
+                });
+                return;
+              }
+              if (_activeView == 'ARTIST' && _selectedGroup == null) {
+                final l = await DatabaseHelper.getDistinctGroups('artist', val);
                 setState(() => _groupResults = l);
-              } else if (_activeView == 'ALBUM' && _selectedSubGroup == null) {
-                final l = await DatabaseHelper.getDistinctValues('album', val);
+              } else if (_activeView == 'ALBUM' && _selectedGroup == null) {
+                final l = await DatabaseHelper.getDistinctGroups('album', val);
                 setState(() => _groupResults = l);
               } else {
-                final l = await DatabaseHelper.searchSongs(query: val, category: _activeView);
+                final l = await DatabaseHelper.searchSongs(
+                  query: val,
+                  category: _activeView,
+                  exactGroup: _selectedGroup,
+                );
                 setState(() => _searchResults = l);
               }
             }
@@ -608,20 +867,94 @@ jobs:
             @override
             Widget build(BuildContext context) {
               return Scaffold(
-                body: SafeArea(
-                  child: Column(
-                    children: [
-                      _buildTopBar(),
-                      Expanded(
-                        child: Row(
+                body: Container(
+                  decoration: const BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [Color(0xFF090D16), Color(0xFF131B2E), Color(0xFF1A103C)],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                  ),
+                  child: SafeArea(
+                    child: Stack(
+                      children: [
+                        Column(
                           children: [
-                            SizedBox(width: MediaQuery.of(context).size.width * 0.34, child: _buildQueuePanel()),
-                            const VerticalDivider(width: 1, color: Colors.white24),
-                            Expanded(child: _buildRightPanel()),
+                            _buildTopBar(),
+                            Expanded(
+                              child: Row(
+                                children: [
+                                  SizedBox(
+                                    width: MediaQuery.of(context).size.width * 0.35,
+                                    child: _buildLeftPanel(),
+                                  ),
+                                  Container(width: 1, color: Colors.amber.withOpacity(0.25)),
+                                  Expanded(child: _buildRightPanel()),
+                                ],
+                              ),
+                            ),
                           ],
                         ),
-                      ),
-                    ],
+                        // Fullscreen Video Overlay for Tablet/Phone when TV is not connected
+                        if (_isTabletFullscreen && !_isTvConnected)
+                          Positioned.fill(
+                            child: Container(
+                              color: Colors.black,
+                              child: Stack(
+                                children: [
+                                  const AndroidView(viewType: 'nmh_video_surface'),
+                                  Positioned(
+                                    top: 16,
+                                    left: 16,
+                                    right: 16,
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                                      decoration: BoxDecoration(
+                                        color: Colors.black.withOpacity(0.65),
+                                        borderRadius: BorderRadius.circular(12),
+                                        border: Border.all(color: Colors.amber.withOpacity(0.5)),
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          Expanded(
+                                            child: Text(
+                                              _currentSong != null
+                                                  ? 'ဖွင့်နေသည်: [${_currentSong!.code}] ${_currentSong!.title} - ${_currentSong!.artist}'
+                                                  : '',
+                                              style: const TextStyle(color: Colors.amberAccent, fontWeight: FontWeight.bold, fontSize: 15),
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                          ),
+                                          ElevatedButton.icon(
+                                            style: ElevatedButton.styleFrom(backgroundColor: Colors.cyanAccent, foregroundColor: Colors.black),
+                                            onPressed: _cycleVoiceMode,
+                                            icon: const Icon(Icons.record_voice_over, size: 18),
+                                            label: Text('Voice: $_voiceMode', style: const TextStyle(fontWeight: FontWeight.bold)),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          ElevatedButton.icon(
+                                            style: ElevatedButton.styleFrom(backgroundColor: Colors.orangeAccent, foregroundColor: Colors.black),
+                                            onPressed: _playNextSong,
+                                            icon: const Icon(Icons.skip_next, size: 18),
+                                            label: const Text('Next', style: TextStyle(fontWeight: FontWeight.bold)),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          ElevatedButton.icon(
+                                            style: ElevatedButton.styleFrom(backgroundColor: Colors.amber, foregroundColor: Colors.black),
+                                            onPressed: () => setState(() => _isTabletFullscreen = false),
+                                            icon: const Icon(Icons.fullscreen_exit, size: 18),
+                                            label: const Text('သီချင်းရွေးမည်', style: const TextStyle(fontWeight: FontWeight.bold)),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
                 ),
               );
@@ -629,40 +962,111 @@ jobs:
 
             Widget _buildTopBar() {
               return Container(
-                height: 68,
+                height: 72,
                 padding: const EdgeInsets.symmetric(horizontal: 14),
-                color: const Color(0xFF161B22),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0E1424).withOpacity(0.95),
+                  border: Border(bottom: BorderSide(color: Colors.amber.withOpacity(0.35), width: 1.2)),
+                ),
                 child: Row(
                   children: [
+                    // NMH Logo + Brand Header
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(gradient: const LinearGradient(colors: [Color(0xFFFF6F00), Color(0xFFFFB300)]), borderRadius: BorderRadius.circular(8)),
-                      child: const Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                        Text('NMH KARAOKE', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 15, color: Colors.black)),
-                        Text('Capt.နေမျိုးထွန်း', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 10, color: Colors.black87)),
-                      ]),
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                      decoration: BoxDecoration(
+                        gradient: const LinearGradient(colors: [Color(0xFF1E293B), Color(0xFF0F172A)]),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: Colors.amber, width: 1.5),
+                      ),
+                      child: Row(
+                        children: [
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(6),
+                            child: Image.asset(
+                              'assets/logo.jpg',
+                              width: 44,
+                              height: 44,
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, __, ___) => const Icon(Icons.mic, color: Colors.amber, size: 36),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          const Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('NMH KARAOKE', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: Colors.amber)),
+                              Text('Capt.နေမျိုးထွန်း', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: Colors.cyanAccent)),
+                            ],
+                          ),
+                        ],
+                      ),
                     ),
                     const SizedBox(width: 14),
+                    // Now Playing Info & Mode Status
                     Expanded(
-                      child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Row(children: [
-                          Icon(Icons.tv, size: 16, color: _isTvConnected ? Colors.greenAccent : Colors.redAccent),
-                          const SizedBox(width: 6),
-                          Text(_isTvConnected ? 'TV Connected' : 'TV Disconnected', style: TextStyle(fontSize: 12, color: _isTvConnected ? Colors.greenAccent : Colors.orangeAccent)),
-                          const SizedBox(width: 12),
-                          Text('စုစုပေါင်း: $_totalSongs ပုဒ်', style: const TextStyle(fontSize: 12, color: Colors.white54)),
-                        ]),
-                        Text(_currentSong != null ? 'ဖွင့်နေသည်: [${_currentSong!.code}] ${_currentSong!.title}' : 'သီချင်းရွေးချယ်ရန် အသင့်ဖြစ်ပါပြီ', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.amberAccent)),
-                      ]),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(
+                                _isTvConnected ? Icons.tv : Icons.tablet_android,
+                                size: 15,
+                                color: _isTvConnected ? Colors.greenAccent : Colors.cyanAccent,
+                              ),
+                              const SizedBox(width: 6),
+                              Text(
+                                _isTvConnected ? 'TV Dual Screen: ချိတ်ဆက်ထားသည်' : 'Tablet Mode: မျက်နှာပြင်ပေါ်တိုက်ရိုက်ကြည့်နိုင်သည်',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                  color: _isTvConnected ? Colors.greenAccent : Colors.cyanAccent,
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: Colors.amber.withOpacity(0.15),
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: Text('သီချင်းစုစုပေါင်း: $_totalSongs ပုဒ်', style: const TextStyle(fontSize: 11, color: Colors.amber)),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            _currentSong != null
+                                ? 'လက်ရှိဖွင့်နေသည်: [${_currentSong!.code}] ${_currentSong!.title} - ${_currentSong!.artist}'
+                                : 'သီချင်းရွေးချယ်ရန် အသင့်ဖြစ်ပါပြီ',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white),
+                          ),
+                        ],
+                      ),
                     ),
+                    // Control Buttons
                     _topBtn(Icons.record_voice_over, 'Voice: $_voiceMode', Colors.cyanAccent, _cycleVoiceMode),
-                    _topBtn(_isPlaying ? Icons.pause : Icons.play_arrow, _isPlaying ? 'Pause' : 'Play', Colors.greenAccent, () async {
-                      final p = await platform.invokeMethod('pauseResume');
-                      setState(() => _isPlaying = p == true);
-                    }),
+                    _topBtn(
+                      _isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
+                      _isPlaying ? 'Pause' : 'Play',
+                      Colors.greenAccent,
+                      () async {
+                        final p = await platform.invokeMethod('pauseResume');
+                        setState(() => _isPlaying = p == true);
+                      },
+                    ),
                     _topBtn(Icons.replay, 'Replay', Colors.amber, () => platform.invokeMethod('replay')),
                     _topBtn(Icons.skip_next, 'Next', Colors.orangeAccent, _playNextSong),
-                    _topBtn(_isSyncing ? Icons.hourglass_top : Icons.sync, 'Sync Excel', Colors.purpleAccent, _isSyncing ? () {} : _syncExcelData),
+                    _topBtn(
+                      _isSyncing ? Icons.hourglass_top : Icons.sync,
+                      _isSyncing ? 'ဖတ်နေသည်...' : 'Sync Excel',
+                      Colors.purpleAccent,
+                      _syncExcelData,
+                    ),
                   ],
                 ),
               );
@@ -673,28 +1077,99 @@ jobs:
                 padding: const EdgeInsets.only(left: 8),
                 child: InkWell(
                   onTap: onTap,
+                  borderRadius: BorderRadius.circular(10),
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                    decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(8), border: Border.all(color: color.withOpacity(0.5))),
-                    child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(icon, color: color, size: 20), Text(label, style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.bold))]),
+                    decoration: BoxDecoration(
+                      color: color.withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: color.withOpacity(0.6)),
+                    ),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(icon, color: color, size: 22),
+                        const SizedBox(height: 2),
+                        Text(label, style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.bold)),
+                      ],
+                    ),
                   ),
                 ),
               );
             }
 
-            Widget _buildQueuePanel() {
+            Widget _buildLeftPanel() {
               return Container(
-                color: const Color(0xFF11161D),
+                color: const Color(0xFF0C111E).withOpacity(0.85),
                 child: Column(
                   children: [
+                    // Tablet Video Preview Box when TV is not connected
+                    if (!_isTvConnected && !_isTabletFullscreen)
+                      Container(
+                        height: 185,
+                        margin: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: Colors.black,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: Colors.amber.withOpacity(0.6), width: 1.5),
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(10),
+                          child: Stack(
+                            children: [
+                              const AndroidView(viewType: 'nmh_video_surface'),
+                              if (_currentSong == null)
+                                Center(
+                                  child: Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Icon(Icons.music_video, size: 40, color: Colors.amber.withOpacity(0.5)),
+                                      const SizedBox(height: 6),
+                                      const Text('သီချင်းရွေးလိုက်ပါက ဤနေရာတွင် ဗီဒီယိုပေါ်ပါမည်',
+                                          style: TextStyle(fontSize: 12, color: Colors.white54)),
+                                    ],
+                                  ),
+                                ),
+                              if (_currentSong != null)
+                                Positioned(
+                                  bottom: 8,
+                                  right: 8,
+                                  child: ElevatedButton.icon(
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: Colors.amber,
+                                      foregroundColor: Colors.black,
+                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                    ),
+                                    onPressed: () => setState(() => _isTabletFullscreen = true),
+                                    icon: const Icon(Icons.fullscreen, size: 18),
+                                    label: const Text('မျက်နှာပြင်အပြည့်', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    // Queue Header
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                      color: const Color(0xFF1C232E),
-                      child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                        Text('ရွေးထားသောသီချင်းများ (${_queue.length})', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.amber)),
-                        if (_queue.isNotEmpty) InkWell(onTap: () => setState(() => _queue.clear()), child: const Text('အကုန်ဖျက်', style: TextStyle(color: Colors.redAccent, fontSize: 12))),
-                      ]),
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(colors: [Colors.amber.withOpacity(0.25), Colors.transparent]),
+                        border: Border(bottom: BorderSide(color: Colors.amber.withOpacity(0.3))),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text('ရွေးထားသောသီချင်းများ (${_queue.length})',
+                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.amber)),
+                          if (_queue.isNotEmpty)
+                            InkWell(
+                              onTap: () => setState(() => _queue.clear()),
+                              child: const Text('အကုန်ဖျက်', style: TextStyle(color: Colors.redAccent, fontSize: 12, fontWeight: FontWeight.bold)),
+                            ),
+                        ],
+                      ),
                     ),
+                    // Queue List
                     Expanded(
                       child: _queue.isEmpty
                           ? const Center(child: Text('ရွေးချယ်ထားသော သီချင်းမရှိသေးပါ', style: TextStyle(color: Colors.white38)))
@@ -705,14 +1180,47 @@ jobs:
                                 final s = _queue[index];
                                 return ListTile(
                                   dense: true,
-                                  leading: CircleAvatar(radius: 13, backgroundColor: Colors.amber.withOpacity(0.2), child: Text('${index + 1}', style: const TextStyle(fontSize: 11, color: Colors.amber))),
+                                  contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                  leading: CircleAvatar(
+                                    radius: 13,
+                                    backgroundColor: Colors.amber.withOpacity(0.25),
+                                    child: Text('${index + 1}', style: const TextStyle(fontSize: 11, color: Colors.amber, fontWeight: FontWeight.bold)),
+                                  ),
                                   title: Text(s.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
                                   subtitle: Text('${s.code} • ${s.artist}', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11, color: Colors.white60)),
-                                  trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                                    IconButton(icon: const Icon(Icons.arrow_upward, size: 18, color: Colors.cyanAccent), onPressed: index == 0 ? null : () => setState(() { final it = _queue.removeAt(index); _queue.insert(index - 1, it); })),
-                                    IconButton(icon: const Icon(Icons.arrow_downward, size: 18, color: Colors.cyanAccent), onPressed: index == _queue.length - 1 ? null : () => setState(() { final it = _queue.removeAt(index); _queue.insert(index + 1, it); })),
-                                    IconButton(icon: const Icon(Icons.delete_outline, size: 18, color: Colors.redAccent), onPressed: () => setState(() => _queue.removeAt(index))),
-                                  ]),
+                                  trailing: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      IconButton(
+                                        icon: const Icon(Icons.arrow_upward, size: 18, color: Colors.cyanAccent),
+                                        padding: EdgeInsets.zero,
+                                        constraints: const BoxConstraints(minWidth: 28),
+                                        onPressed: index == 0
+                                            ? null
+                                            : () => setState(() {
+                                                  final it = _queue.removeAt(index);
+                                                  _queue.insert(index - 1, it);
+                                                }),
+                                      ),
+                                      IconButton(
+                                        icon: const Icon(Icons.arrow_downward, size: 18, color: Colors.cyanAccent),
+                                        padding: EdgeInsets.zero,
+                                        constraints: const BoxConstraints(minWidth: 28),
+                                        onPressed: index == _queue.length - 1
+                                            ? null
+                                            : () => setState(() {
+                                                  final it = _queue.removeAt(index);
+                                                  _queue.insert(index + 1, it);
+                                                }),
+                                      ),
+                                      IconButton(
+                                        icon: const Icon(Icons.delete_outline, size: 18, color: Colors.redAccent),
+                                        padding: EdgeInsets.zero,
+                                        constraints: const BoxConstraints(minWidth: 28),
+                                        onPressed: () => setState(() => _queue.removeAt(index)),
+                                      ),
+                                    ],
+                                  ),
                                 );
                               },
                             ),
@@ -725,56 +1233,115 @@ jobs:
             Widget _buildRightPanel() {
               if (_activeView == 'HOME') {
                 return Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: GridView.count(
-                    crossAxisCount: 3, crossAxisSpacing: 16, mainAxisSpacing: 16, childAspectRatio: 1.35,
+                  padding: const EdgeInsets.all(18),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      _card('အဆိုတော်', 'ARTIST', Icons.mic_external_on, [const Color(0xFF6A11CB), const Color(0xFF2575FC)]),
-                      _card('တေးစီးရီး', 'ALBUM', Icons.album, [const Color(0xFF11998E), const Color(0xFF38EF7D)]),
-                      _card('သီချင်းနာမည်', 'TITLE', Icons.music_note, [const Color(0xFFFF512F), const Color(0xFFDD2476)]),
-                      _card('သီချင်းနံပါတ်', 'CODE', Icons.dialpad, [const Color(0xFFF7971E), const Color(0xFFFFD200)]),
-                      _card('DISCO သီချင်းများ', 'DISCO', Icons.nightlife, [const Color(0xFF8E2DE2), const Color(0xFF4A00E0)]),
+                      const Text('သီချင်းအမျိုးအစား ရွေးချယ်ပါ',
+                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.amberAccent)),
+                      const SizedBox(height: 14),
+                      Expanded(
+                        child: GridView.count(
+                          crossAxisCount: 3,
+                          crossAxisSpacing: 16,
+                          mainAxisSpacing: 16,
+                          childAspectRatio: 1.35,
+                          children: [
+                            _themedCard('အဆိုတော်', 'ARTIST', Icons.mic_external_on, [const Color(0xFF4F46E5), const Color(0xFF7C3AED)]),
+                            _themedCard('တေးစီးရီး', 'ALBUM', Icons.album, [const Color(0xFF059669), const Color(0xFF10B981)]),
+                            _themedCard('သီချင်းနာမည်', 'TITLE', Icons.music_note, [const Color(0xFFE11D48), const Color(0xFFF43F5E)]),
+                            _themedCard('သီချင်းနံပါတ်', 'CODE', Icons.dialpad, [const Color(0xFFD97706), const Color(0xFFF59E0B)]),
+                            _themedCard('DISCO သီချင်းများ', 'DISCO', Icons.nightlife, [const Color(0xFF9333EA), const Color(0xFFC026D3)]),
+                            _themedCard('ဖွင့်ခဲ့ပြီးသောသီချင်း', 'HISTORY', Icons.history, [const Color(0xFF0284C7), const Color(0xFF06B6D4)]),
+                          ],
+                        ),
+                      ),
                     ],
                   ),
                 );
               }
+
               return Column(
                 children: [
                   Container(
                     padding: const EdgeInsets.all(10),
-                    color: const Color(0xFF161B22),
-                    child: Row(children: [
-                      ElevatedButton.icon(
-                        style: ElevatedButton.styleFrom(backgroundColor: Colors.amber, foregroundColor: Colors.black),
-                        onPressed: () => setState(() { if (_selectedSubGroup != null) _selectedSubGroup = null; else _activeView = 'HOME'; }),
-                        icon: const Icon(Icons.arrow_back),
-                        label: Text(_selectedSubGroup != null ? 'နောက်သို့' : 'ပင်မစာမျက်နှာ'),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: TextField(
-                          controller: _searchController,
-                          onChanged: _onSearchChanged,
-                          keyboardType: _activeView == 'CODE' ? TextInputType.number : TextInputType.text,
-                          decoration: InputDecoration(hintText: 'ရှာရန် ရိုက်ထည့်ပါ...', filled: true, fillColor: Colors.white10, prefixIcon: const Icon(Icons.search), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none)),
+                    color: const Color(0xFF0E1424),
+                    child: Row(
+                      children: [
+                        ElevatedButton.icon(
+                          style: ElevatedButton.styleFrom(backgroundColor: Colors.amber, foregroundColor: Colors.black),
+                          onPressed: () => setState(() {
+                            if (_selectedGroup != null) {
+                              _selectedGroup = null;
+                            } else {
+                              _activeView = 'HOME';
+                            }
+                          }),
+                          icon: const Icon(Icons.arrow_back),
+                          label: Text(_selectedGroup != null ? 'နောက်သို့' : 'ပင်မစာမျက်နှာ', style: const TextStyle(fontWeight: FontWeight.bold)),
                         ),
-                      ),
-                    ]),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: TextField(
+                            controller: _searchController,
+                            onChanged: _onSearchChanged,
+                            keyboardType: _activeView == 'CODE' ? TextInputType.number : TextInputType.text,
+                            decoration: InputDecoration(
+                              hintText: _selectedGroup != null
+                                  ? '$_selectedGroup ၏ သီချင်းများ ရှာရန်...'
+                                  : 'သီချင်းနာမည် / အဆိုတော် / နံပါတ် ရိုက်ထည့်ပါ...',
+                              filled: true,
+                              fillColor: Colors.white10,
+                              prefixIcon: const Icon(Icons.search, color: Colors.amber),
+                              suffixIcon: IconButton(
+                                icon: const Icon(Icons.clear),
+                                onPressed: () {
+                                  _searchController.clear();
+                                  _onSearchChanged('');
+                                },
+                              ),
+                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                   Expanded(
-                    child: (_activeView == 'ARTIST' || _activeView == 'ALBUM') && _selectedSubGroup == null
+                    child: (_activeView == 'ARTIST' || _activeView == 'ALBUM') && _selectedGroup == null
                         ? GridView.builder(
                             padding: const EdgeInsets.all(12),
-                            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 3, childAspectRatio: 2.8, crossAxisSpacing: 10, mainAxisSpacing: 10),
+                            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                              crossAxisCount: 3,
+                              childAspectRatio: 2.8,
+                              crossAxisSpacing: 10,
+                              mainAxisSpacing: 10,
+                            ),
                             itemCount: _groupResults.length,
                             itemBuilder: (context, index) {
                               final name = _groupResults[index];
                               return InkWell(
                                 onTap: () async {
-                                  final songs = await DatabaseHelper.searchSongs(query: name, category: _activeView);
-                                  setState(() { _selectedSubGroup = name; _searchResults = songs; });
+                                  final songs = await DatabaseHelper.searchSongs(
+                                    query: '',
+                                    category: _activeView,
+                                    exactGroup: name,
+                                  );
+                                  setState(() {
+                                    _selectedGroup = name;
+                                    _searchResults = songs;
+                                  });
                                 },
-                                child: Container(padding: const EdgeInsets.symmetric(horizontal: 12), decoration: BoxDecoration(color: const Color(0xFF1F2733), borderRadius: BorderRadius.circular(10)), alignment: Alignment.centerLeft, child: Text(name, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14))),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF162038),
+                                    borderRadius: BorderRadius.circular(10),
+                                    border: Border.all(color: Colors.amber.withOpacity(0.25)),
+                                  ),
+                                  alignment: Alignment.centerLeft,
+                                  child: Text(name, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                                ),
                               );
                             },
                           )
@@ -784,14 +1351,39 @@ jobs:
                             itemBuilder: (context, index) {
                               final s = _searchResults[index];
                               return ListTile(
-                                leading: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: Colors.amber.withOpacity(0.15), borderRadius: BorderRadius.circular(6)), child: Text(s.code, style: const TextStyle(color: Colors.amber, fontWeight: FontWeight.bold))),
-                                title: Text(s.title, style: const TextStyle(fontWeight: FontWeight.bold)),
-                                subtitle: Text('${s.artist} • ${s.album}', style: const TextStyle(color: Colors.white60, fontSize: 12)),
-                                trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                                  ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.amber, foregroundColor: Colors.black), onPressed: () => _addToQueue(s), child: const Text('တန်းစီမည်')),
-                                  const SizedBox(width: 8),
-                                  OutlinedButton(onPressed: () => _addToQueue(s, playNow: true), child: const Text('ချက်ချင်းဖွင့်')),
-                                ]),
+                                leading: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: Colors.amber.withOpacity(0.2),
+                                    borderRadius: BorderRadius.circular(6),
+                                    border: Border.all(color: Colors.amber.withOpacity(0.5)),
+                                  ),
+                                  child: Text(s.code, style: const TextStyle(color: Colors.amber, fontWeight: FontWeight.bold)),
+                                ),
+                                title: Text(s.title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                                subtitle: Text(
+                                  '${s.artist}${s.coArtist.isNotEmpty ? " & ${s.coArtist}" : ""} • ${s.album}',
+                                  style: const TextStyle(color: Colors.white70, fontSize: 12),
+                                ),
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    ElevatedButton(
+                                      style: ElevatedButton.styleFrom(backgroundColor: Colors.amber, foregroundColor: Colors.black),
+                                      onPressed: () => _addToQueue(s),
+                                      child: const Text('တန်းစီမည်', style: TextStyle(fontWeight: FontWeight.bold)),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    OutlinedButton(
+                                      style: OutlinedButton.styleFrom(
+                                        foregroundColor: Colors.cyanAccent,
+                                        side: const BorderSide(color: Colors.cyanAccent),
+                                      ),
+                                      onPressed: () => _addToQueue(s, playNow: true),
+                                      child: const Text('ချက်ချင်းဖွင့်', style: TextStyle(fontWeight: FontWeight.bold)),
+                                    ),
+                                  ],
+                                ),
                               );
                             },
                           ),
@@ -800,12 +1392,25 @@ jobs:
               );
             }
 
-            Widget _card(String title, String cat, IconData icon, List<Color> colors) {
+            Widget _themedCard(String title, String cat, IconData icon, List<Color> colors) {
               return InkWell(
                 onTap: () => _openCategory(cat),
+                borderRadius: BorderRadius.circular(16),
                 child: Container(
-                  decoration: BoxDecoration(gradient: LinearGradient(colors: colors), borderRadius: BorderRadius.circular(16)),
-                  child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(icon, size: 46, color: Colors.white), const SizedBox(height: 10), Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))]),
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(colors: colors, begin: Alignment.topLeft, end: Alignment.bottomRight),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: Colors.white24, width: 1.2),
+                    boxShadow: [BoxShadow(color: colors.first.withOpacity(0.4), blurRadius: 8, offset: const Offset(0, 4))],
+                  ),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(icon, size: 46, color: Colors.white),
+                      const SizedBox(height: 10),
+                      Text(title, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: Colors.white)),
+                    ],
+                  ),
                 ),
               );
             }
@@ -818,5 +1423,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: NMH-Standalone-Karaoke-APK
+          name: NMH-Standalone-Karaoke-APK-v2
           path: build/app/outputs/flutter-apk/app-release.apk
