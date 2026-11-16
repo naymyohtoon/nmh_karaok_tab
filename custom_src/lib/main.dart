@@ -89,7 +89,7 @@ class DatabaseHelper {
     final res = await db.query('songs', distinct: true, columns: [col], where: whereClause, whereArgs: whereArgs, orderBy: '$col ASC', limit: limit, offset: offset);
     return res.map((e) => e[col].toString()).where((s) => s.isNotEmpty).toList();
   }
-
+}
 List<Map<String, dynamic>> _parseCsvFromPath(String filePath, bool isDisco) {
   final lines = File(filePath).readAsLinesSync();
   final List<Map<String, dynamic>> list = [];
