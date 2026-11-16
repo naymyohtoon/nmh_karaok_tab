@@ -27,15 +27,8 @@ jobs:
           sed -i 's/1.7.10/1.9.22/g' android/settings.gradle || true
           sed -i 's/1.8.22/1.9.22/g' android/settings.gradle || true
           sed -i 's/1.7.10/1.9.22/g' android/build.gradle || true
-
-      - name: Setup Logo Asset
-        run: |
           mkdir -p assets
-          if [ -f image_afebac29.jpg ]; then
-            cp image_afebac29.jpg assets/logo.jpg
-          else
-            printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82' > assets/logo.jpg
-          fi
+          if [ -f image_afebac29.jpg ]; then cp image_afebac29.jpg assets/logo.jpg; fi
 
       - name: Write pubspec.yaml
         run: |
@@ -43,7 +36,7 @@ jobs:
           name: nmh_karaok_tab
           description: NMH Standalone Offline Dual Screen Karaoke System
           publish_to: 'none'
-          version: 1.0.3+3
+          version: 1.0.0+3
           environment:
             sdk: '>=3.2.0 <4.0.0'
           dependencies:
@@ -61,7 +54,7 @@ jobs:
           flutter:
             uses-material-design: true
             assets:
-              - assets/logo.jpg
+              - assets/
           EOF
           flutter pub get
 
@@ -114,7 +107,6 @@ jobs:
           import android.media.MediaPlayer
           import android.os.Bundle
           import android.view.Display
-          import android.view.Surface
           import android.view.SurfaceHolder
           import android.view.SurfaceView
           import android.view.WindowManager
@@ -122,7 +114,9 @@ jobs:
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
-          import io.flutter.view.TextureRegistry
+          import io.flutter.plugin.common.StandardMessageCodec
+          import io.flutter.plugin.platform.PlatformView
+          import io.flutter.plugin.platform.PlatformViewFactory
           import java.io.File
 
           class MainActivity : FlutterActivity() {
@@ -130,20 +124,17 @@ jobs:
               private var displayManager: DisplayManager? = null
               private var presentation: KaraokePresentation? = null
               private var mediaPlayer: MediaPlayer? = null
+              private var localSurfaceHolder: SurfaceHolder? = null
               private var currentVoiceMode = "STEREO"
               private var methodChannel: MethodChannel? = null
-              private var textureEntry: TextureRegistry.SurfaceTextureEntry? = null
-              private var localSurface: Surface? = null
-              private var currentVideoPath: String? = null
 
               private val displayListener = object : DisplayManager.DisplayListener {
-                  override fun onDisplayAdded(displayId: Int) {
-                      setupDisplayRouting()
-                  }
+                  override fun onDisplayAdded(displayId: Int) { setupSecondaryDisplay() }
                   override fun onDisplayRemoved(displayId: Int) {
                       presentation?.dismiss()
                       presentation = null
-                      setupDisplayRouting()
+                      attachActiveSurface()
+                      notifyDisplayStatus(false)
                   }
                   override fun onDisplayChanged(displayId: Int) {}
               }
@@ -152,41 +143,28 @@ jobs:
                   super.configureFlutterEngine(flutterEngine)
                   window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
+                  flutterEngine.platformViewsController.registry.registerViewFactory(
+                      "nmh_local_video_view",
+                      LocalVideoViewFactory()
+                  )
+
                   displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
                   displayManager?.registerDisplayListener(displayListener, null)
 
                   methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
                   methodChannel?.setMethodCallHandler { call, result ->
                       when (call.method) {
-                          "initTexture" -> {
-                              if (textureEntry == null) {
-                                  textureEntry = flutterEngine.renderer.createSurfaceTexture()
-                                  localSurface = Surface(textureEntry!!.surfaceTexture())
-                              }
-                              val connected = setupDisplayRouting()
-                              result.success(mapOf("textureId" to textureEntry!!.id(), "tvConnected" to connected))
-                          }
-                          "checkDisplay" -> {
-                              result.success(setupDisplayRouting())
-                          }
+                          "checkDisplay" -> result.success(setupSecondaryDisplay())
                           "playVideo" -> {
                               val path = call.argument<String>("path")
                               if (path != null) {
                                   playVideo(path)
                                   result.success(true)
                               } else {
-                                  result.error("INVALID_PATH", "Path null", null)
+                                  result.error("INVALID_PATH", "Path is null", null)
                               }
                           }
-                          "pauseResume" -> {
-                              val mp = mediaPlayer
-                              if (mp != null) {
-                                  if (mp.isPlaying) { mp.pause(); result.success(false) }
-                                  else { mp.start(); result.success(true) }
-                              } else {
-                                  result.success(false)
-                              }
-                          }
+                          "pauseResume" -> result.success(togglePauseResume())
                           "replay" -> {
                               mediaPlayer?.seekTo(0)
                               mediaPlayer?.start()
@@ -206,70 +184,61 @@ jobs:
                   }
               }
 
-              private fun setupDisplayRouting(): Boolean {
+              private fun notifyDisplayStatus(isConnected: Boolean) {
+                  runOnUiThread { methodChannel?.invokeMethod("onDisplayChanged", isConnected) }
+              }
+
+              private fun setupSecondaryDisplay(): Boolean {
                   val displays = displayManager?.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
-                  val hasTv = !displays.isNullOrEmpty()
-                  if (hasTv) {
-                      val tvDisplay = displays!![0]
+                  if (!displays.isNullOrEmpty()) {
+                      val tvDisplay = displays[0]
                       if (presentation == null || presentation?.display?.displayId != tvDisplay.displayId) {
                           presentation?.dismiss()
                           presentation = KaraokePresentation(this, tvDisplay)
                           presentation?.show()
                       }
-                      presentation?.surfaceView?.holder?.let { h ->
-                          if (h.surface.isValid) mediaPlayer?.setDisplay(h)
-                      }
-                  } else {
-                      presentation?.dismiss()
-                      presentation = null
-                      if (localSurface != null && localSurface!!.isValid) {
-                          try {
-                              mediaPlayer?.setDisplay(null)
-                              mediaPlayer?.setSurface(localSurface)
-                          } catch (_: Exception) {}
-                      }
+                      attachActiveSurface()
+                      notifyDisplayStatus(true)
+                      return true
                   }
-                  runOnUiThread {
-                      methodChannel?.invokeMethod("onDisplayChanged", hasTv)
+                  attachActiveSurface()
+                  notifyDisplayStatus(false)
+                  return false
+              }
+
+              private fun attachActiveSurface() {
+                  val tvHolder = presentation?.surfaceView?.holder
+                  if (tvHolder != null && tvHolder.surface.isValid) {
+                      mediaPlayer?.setDisplay(tvHolder)
+                  } else if (localSurfaceHolder != null && localSurfaceHolder!!.surface.isValid) {
+                      mediaPlayer?.setDisplay(localSurfaceHolder)
                   }
-                  return hasTv
               }
 
               private fun playVideo(filePath: String) {
-                  val file = File(filePath)
-                  if (!file.exists()) return
-                  currentVideoPath = filePath
-                  val hasTv = setupDisplayRouting()
-
+                  setupSecondaryDisplay()
+                  if (!File(filePath).exists()) return
                   try {
                       mediaPlayer?.release()
                       mediaPlayer = MediaPlayer().apply {
                           setDataSource(filePath)
-                          if (hasTv && presentation?.surfaceView?.holder?.surface?.isValid == true) {
-                              setDisplay(presentation!!.surfaceView.holder)
-                          } else if (localSurface != null && localSurface!!.isValid) {
-                              setSurface(localSurface)
-                          }
+                          attachActiveSurface()
                           setOnPreparedListener { mp ->
-                              if (!hasTv && localSurface != null) {
-                                  textureEntry?.surfaceTexture()?.setDefaultBufferSize(mp.videoWidth, mp.videoHeight)
-                              }
                               applyVoiceMode(currentVoiceMode)
+                              attachActiveSurface()
                               mp.start()
-                              runOnUiThread {
-                                  methodChannel?.invokeMethod("onVideoSize", mapOf("w" to mp.videoWidth, "h" to mp.videoHeight))
-                              }
                           }
                           setOnCompletionListener {
-                              runOnUiThread {
-                                  methodChannel?.invokeMethod("onSongCompleted", null)
-                              }
+                              runOnUiThread { methodChannel?.invokeMethod("onSongCompleted", null) }
                           }
                           prepareAsync()
                       }
-                  } catch (e: Exception) {
-                      e.printStackTrace()
-                  }
+                  } catch (e: Exception) { e.printStackTrace() }
+              }
+
+              private fun togglePauseResume(): Boolean {
+                  val mp = mediaPlayer ?: return false
+                  return if (mp.isPlaying) { mp.pause(); false } else { mp.start(); true }
               }
 
               private fun stopPlayback() {
@@ -287,23 +256,12 @@ jobs:
                       val tracks = mp.trackInfo
                       val audioTracks = mutableListOf<Int>()
                       for (i in tracks.indices) {
-                          if (tracks[i].trackType == MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_AUDIO) {
-                              audioTracks.add(i)
-                          }
+                          if (tracks[i].trackType == MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_AUDIO) audioTracks.add(i)
                       }
                       when (mode) {
-                          "STEREO" -> {
-                              if (audioTracks.isNotEmpty()) mp.selectTrack(audioTracks[0])
-                              mp.setVolume(1.0f, 1.0f)
-                          }
-                          "LEFT" -> {
-                              if (audioTracks.isNotEmpty()) mp.selectTrack(audioTracks[0])
-                              mp.setVolume(1.0f, 0.0f)
-                          }
-                          "RIGHT" -> {
-                              if (audioTracks.isNotEmpty()) mp.selectTrack(audioTracks[0])
-                              mp.setVolume(0.0f, 1.0f)
-                          }
+                          "STEREO" -> { if (audioTracks.isNotEmpty()) mp.selectTrack(audioTracks[0]); mp.setVolume(1.0f, 1.0f) }
+                          "LEFT" -> { if (audioTracks.isNotEmpty()) mp.selectTrack(audioTracks[0]); mp.setVolume(1.0f, 0.0f) }
+                          "RIGHT" -> { if (audioTracks.isNotEmpty()) mp.selectTrack(audioTracks[0]); mp.setVolume(0.0f, 1.0f) }
                           "TRACK2" -> {
                               if (audioTracks.size > 1) mp.selectTrack(audioTracks[1])
                               else if (audioTracks.isNotEmpty()) mp.selectTrack(audioTracks[0])
@@ -317,9 +275,28 @@ jobs:
                   displayManager?.unregisterDisplayListener(displayListener)
                   stopPlayback()
                   presentation?.dismiss()
-                  localSurface?.release()
-                  textureEntry?.release()
                   super.onDestroy()
+              }
+
+              inner class LocalVideoViewFactory : PlatformViewFactory(StandardMessageCodec.INSTANCE) {
+                  override fun create(context: Context, viewId: Int, args: Any?): PlatformView {
+                      return object : PlatformView {
+                          private val surfaceView = SurfaceView(context).apply {
+                              holder.addCallback(object : SurfaceHolder.Callback {
+                                  override fun surfaceCreated(holder: SurfaceHolder) {
+                                      localSurfaceHolder = holder
+                                      attachActiveSurface()
+                                  }
+                                  override fun surfaceChanged(holder: SurfaceHolder, f: Int, w: Int, h: Int) {}
+                                  override fun surfaceDestroyed(holder: SurfaceHolder) {
+                                      if (localSurfaceHolder == holder) localSurfaceHolder = null
+                                  }
+                              })
+                          }
+                          override fun getView() = surfaceView
+                          override fun dispose() {}
+                      }
+                  }
               }
 
               inner class KaraokePresentation(context: Context, display: Display) : Presentation(context, display) {
@@ -329,16 +306,13 @@ jobs:
                       val layout = FrameLayout(context).apply { setBackgroundColor(android.graphics.Color.BLACK) }
                       surfaceView = SurfaceView(context)
                       surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
-                          override fun surfaceCreated(holder: SurfaceHolder) {
-                              mediaPlayer?.setSurface(null)
-                              mediaPlayer?.setDisplay(holder)
-                          }
-                          override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
-                          override fun surfaceDestroyed(holder: SurfaceHolder) {
-                              mediaPlayer?.setDisplay(null)
-                          }
+                          override fun surfaceCreated(holder: SurfaceHolder) { mediaPlayer?.setDisplay(holder) }
+                          override fun surfaceChanged(holder: SurfaceHolder, f: Int, w: Int, h: Int) {}
+                          override fun surfaceDestroyed(holder: SurfaceHolder) { mediaPlayer?.setDisplay(null) }
                       })
-                      layout.addView(surfaceView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+                      layout.addView(surfaceView, FrameLayout.LayoutParams(
+                          FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
+                      ))
                       setContentView(layout)
                   }
               }
@@ -385,56 +359,88 @@ jobs:
           class Song {
             final String code, title, artist, coArtist, album;
             final bool isDisco;
-            Song({required this.code, required this.title, required this.artist, required this.coArtist, required this.album, this.isDisco = false});
-            Map<String, dynamic> toMap() => {'code': code, 'title': title, 'artist': artist, 'coArtist': coArtist, 'album': album, 'isDisco': isDisco ? 1 : 0};
-            factory Song.fromMap(Map<String, dynamic> m) => Song(code: m['code'] ?? '', title: m['title'] ?? '', artist: m['artist'] ?? '', coArtist: m['coArtist'] ?? '', album: m['album'] ?? '', isDisco: (m['isDisco'] ?? 0) == 1);
-          }
-
-          List<Map<String, dynamic>> _parseExcelIsolate(Map<String, dynamic> args) {
-            final Uint8List bytes = args['bytes'];
-            final bool isDisco = args['isDisco'];
-            final excel = xls.Excel.decodeBytes(bytes);
-            final List<Map<String, dynamic>> out = [];
-            for (final t in excel.tables.keys) {
-              final sheet = excel.tables[t];
-              if (sheet == null) continue;
-              for (int i = 1; i < sheet.rows.length; i++) {
-                final row = sheet.rows[i];
-                String cell(int idx) => (idx < row.length && row[idx]?.value != null) ? row[idx]!.value.toString().trim() : '';
-                final code = cell(0);
-                final title = cell(1);
-                if (code.isNotEmpty && title.isNotEmpty) {
-                  out.add({
-                    'code': code,
-                    'title': title,
-                    'artist': cell(2),
-                    'coArtist': cell(3),
-                    'album': cell(4),
-                    'isDisco': isDisco ? 1 : 0,
-                  });
-                }
-              }
-            }
-            return out;
+            Song({
+              required this.code,
+              required this.title,
+              required this.artist,
+              required this.coArtist,
+              required this.album,
+              this.isDisco = false,
+            });
+            Map<String, dynamic> toMap() => {
+              'code': code,
+              'title': title,
+              'artist': artist,
+              'coArtist': coArtist,
+              'album': album,
+              'isDisco': isDisco ? 1 : 0,
+            };
+            factory Song.fromMap(Map<String, dynamic> m) => Song(
+              code: m['code'] ?? '',
+              title: m['title'] ?? '',
+              artist: m['artist'] ?? '',
+              coArtist: m['coArtist'] ?? '',
+              album: m['album'] ?? '',
+              isDisco: (m['isDisco'] ?? 0) == 1,
+            );
           }
 
           class DatabaseHelper {
             static Database? _db;
             static Future<Database> get database async {
               if (_db != null) return _db!;
-              _db = await openDatabase(p.join(await getDatabasesPath(), 'nmh_karaoke_v3.db'), version: 1, onCreate: (db, v) async {
-                await db.execute('CREATE TABLE songs(code TEXT PRIMARY KEY, title TEXT, artist TEXT, coArtist TEXT, album TEXT, isDisco INTEGER)');
-                await db.execute('CREATE INDEX idx_title ON songs(title)');
-                await db.execute('CREATE INDEX idx_artist ON songs(artist)');
-                await db.execute('CREATE INDEX idx_album ON songs(album)');
-              });
-          
-      - name: Build Release APK
-        run: flutter build apk --release
+              final dbPath = await getDatabasesPath();
+              _db = await openDatabase(
+                p.join(dbPath, 'nmh_karaoke_v3.db'),
+                version: 1,
+                onCreate: (db, v) async {
+                  await db.execute(
+                    'CREATE TABLE songs(code TEXT PRIMARY KEY, title TEXT, artist TEXT, coArtist TEXT, album TEXT, isDisco INTEGER)'
+                  );
+                  await db.execute('CREATE INDEX idx_title ON songs(title)');
+                  await db.execute('CREATE INDEX idx_artist ON songs(artist)');
+                  await db.execute('CREATE INDEX idx_album ON songs(album)');
+                },
+              );
+              return _db!;
+            }
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: NMH-Standalone-Karaoke-APK-v3
-          path: build/app/outputs/flutter-apk/app-release.apk
-          
+            static Future<void> clearAndInsertSongs(List<Map<String, dynamic>> rows) async {
+              final db = await database;
+              await db.transaction((txn) async {
+                await txn.delete('songs');
+                final batch = txn.batch();
+                for (final r in rows) {
+                  batch.insert('songs', r, conflictAlgorithm: ConflictAlgorithm.replace);
+                }
+                await batch.commit(noResult: true);
+              });
+            }
+
+            static Future<int> getSongCount() async {
+              final db = await database;
+              return Sqflite.firstIntValue(await db.rawQuery('SELECT COUNT(*) FROM songs')) ?? 0;
+            }
+
+            static Future<List<Song>> searchSongs({
+              String query = '',
+              String category = 'TITLE',
+              int offset = 0,
+              int limit = 150,
+            }) async {
+              final db = await database;
+              final q = '%${query.trim()}%';
+              List<Map<String, dynamic>> maps;
+              if (category == 'DISCO') {
+                maps = query.trim().isEmpty
+                    ? await db.query('songs', where: 'isDisco = 1', orderBy: 'code ASC', limit: limit, offset: offset)
+                    : await db.query(
+                        'songs',
+                        where: 'isDisco = 1 AND (title LIKE ? OR artist LIKE ? OR code LIKE ?)',
+                        whereArgs: [q, q, q],
+                        orderBy: 'code ASC',
+                        limit: limit,
+                        offset: offset,
+                      );
+              } else if (category == 'CODE') {
+              
