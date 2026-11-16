@@ -307,6 +307,8 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
       setState(() { _searchResults = l; _hasMore = l.length == 200; });
     }
   }
+  bool _isFullVideo = false;
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -317,20 +319,61 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
           children: [
             _buildTopHeader(),
             Expanded(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                child: Row(
-                  children: [
-                    SizedBox(width: MediaQuery.of(context).size.width * 0.33, child: _buildLeftQueueBox()),
-                    const SizedBox(width: 12),
-                    Expanded(child: _buildRightDashboard()),
-                  ],
-                ),
-              ),
+              child: _isFullVideo && !_isTvConnected
+                  ? _buildTabletVideoBox(isFull: true)
+                  : Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      child: Row(
+                        children: [
+                          SizedBox(
+                            width: MediaQuery.of(context).size.width * 0.33,
+                            child: Column(
+                              children: [
+                                if (!_isTvConnected && _currentSong != null) ...[
+                                  _buildTabletVideoBox(isFull: false),
+                                  const SizedBox(height: 6),
+                                ],
+                                Expanded(child: _buildLeftQueueBox()),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(child: _buildRightDashboard()),
+                        ],
+                      ),
+                    ),
             ),
             _buildBottomControlBar(),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildTabletVideoBox({required bool isFull}) {
+    return Container(
+      height: isFull ? double.infinity : 150,
+      decoration: BoxDecoration(color: Colors.black, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.amber)),
+      child: Stack(
+        children: [
+          const ClipRRect(borderRadius: BorderRadius.all(Radius.circular(9)), child: AndroidView(viewType: 'nmh_tablet_video')),
+          Positioned(
+            top: 4,
+            right: 4,
+            child: InkWell(
+              onTap: () => setState(() => _isFullVideo = !_isFullVideo),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(6)),
+                child: Row(children: [
+                  Icon(isFull ? Icons.fullscreen_exit : Icons.fullscreen, color: Colors.amber, size: 16),
+                  const SizedBox(width: 4),
+                  Text(isFull ? 'သီချင်းရွေးရန်' : 'မျက်နှာပြင်အပြည့်', style: const TextStyle(color: Colors.amber, fontSize: 11, fontWeight: FontWeight.bold)),
+                ]),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
