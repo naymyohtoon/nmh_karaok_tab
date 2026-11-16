@@ -1,11 +1,10 @@
 import 'dart:io';
-import 'dart:isolate';
-import 'package:excel/excel.dart' as xls;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:sqflite/sqflite.dart';
+import 'package:video_player/video_player.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -18,7 +17,7 @@ class NMHKaraokeApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'NMH Karaoke',
+      title: 'NMH Karaoke Tab',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(scaffoldBackgroundColor: const Color(0xFF0A0D14), primaryColor: const Color(0xFFFFB300)),
       home: const KaraokeHomeScreen(),
@@ -63,21 +62,15 @@ class DatabaseHelper {
     final q = '%${query.trim()}%';
     List<Map<String, dynamic>> maps;
     if (category == 'DISCO') {
-      maps = query.trim().isEmpty
-          ? await db.query('songs', where: 'isDisco = 1', limit: limit, offset: offset)
-          : await db.query('songs', where: 'isDisco = 1 AND (title LIKE ? OR artist LIKE ? OR code LIKE ?)', whereArgs: [q, q, q], limit: limit, offset: offset);
+      maps = query.trim().isEmpty ? await db.query('songs', where: 'isDisco = 1', limit: limit, offset: offset) : await db.query('songs', where: 'isDisco = 1 AND (title LIKE ? OR artist LIKE ? OR code LIKE ?)', whereArgs: [q, q, q], limit: limit, offset: offset);
     } else if (category == 'CODE') {
-      maps = query.trim().isEmpty
-          ? await db.query('songs', where: 'isDisco = 0', orderBy: 'code ASC', limit: limit, offset: offset)
-          : await db.query('songs', where: 'isDisco = 0 AND code LIKE ?', whereArgs: ['${query.trim()}%'], orderBy: 'code ASC', limit: limit, offset: offset);
+      maps = query.trim().isEmpty ? await db.query('songs', where: 'isDisco = 0', orderBy: 'code ASC', limit: limit, offset: offset) : await db.query('songs', where: 'isDisco = 0 AND code LIKE ?', whereArgs: ['${query.trim()}%'], orderBy: 'code ASC', limit: limit, offset: offset);
     } else if (category == 'ARTIST') {
       maps = await db.query('songs', where: 'isDisco = 0 AND (artist LIKE ? OR coArtist LIKE ?)', whereArgs: [q, q], limit: limit, offset: offset);
     } else if (category == 'ALBUM') {
       maps = await db.query('songs', where: 'isDisco = 0 AND album LIKE ?', whereArgs: [q], limit: limit, offset: offset);
     } else {
-      maps = query.trim().isEmpty
-          ? await db.query('songs', where: 'isDisco = 0', limit: limit, offset: offset)
-          : await db.query('songs', where: 'isDisco = 0 AND (title LIKE ? OR code LIKE ?)', whereArgs: [q, q], limit: limit, offset: offset);
+      maps = query.trim().isEmpty ? await db.query('songs', where: 'isDisco = 0', limit: limit, offset: offset) : await db.query('songs', where: 'isDisco = 0 AND (title LIKE ? OR code LIKE ?)', whereArgs: [q, q], limit: limit, offset: offset);
     }
     return maps.map((m) => Song.fromMap(m)).toList();
   }
@@ -90,6 +83,7 @@ class DatabaseHelper {
     return res.map((e) => e[col].toString()).where((s) => s.isNotEmpty).toList();
   }
 }
+
 List<Map<String, dynamic>> _parseCsvFromPath(String filePath, bool isDisco) {
   final lines = File(filePath).readAsLinesSync();
   final List<Map<String, dynamic>> list = [];
@@ -111,10 +105,10 @@ class KaraokeHomeScreen extends StatefulWidget {
 }
 
 class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
-  static const platform = MethodChannel('com.nmh.karaoke/player');
   final List<Song> _queue = [];
   Song? _currentSong;
-  bool _isTvConnected = false, _isPlaying = false, _isSyncing = false, _isLoadingMore = false, _hasMore = true;
+  VideoPlayerController? _videoController;
+  bool _isSyncing = false, _isLoadingMore = false, _hasMore = true, _showVideoScreen = false, _isMuted = false;
   String _voiceMode = 'Stereo', _activeView = 'HOME';
   String? _selectedSubGroup;
   int _totalSongs = 0;
@@ -122,19 +116,21 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
   final ScrollController _scrollController = ScrollController();
   List<Song> _searchResults = [];
   List<String> _groupResults = [];
+  final Map<String, String> _videoIndex = {};
 
   @override
   void initState() {
     super.initState();
-    platform.setMethodCallHandler((call) async {
-      if (call.method == 'onDisplayChanged') setState(() => _isTvConnected = call.arguments == true);
-      if (call.method == 'onSongCompleted') _playNextSong();
-    });
     _scrollController.addListener(() {
       if (_scrollController.position.pixels >= _scrollController.position.maxScrollExtent - 300 && !_isLoadingMore && _hasMore) _loadMoreData();
     });
-    _checkTvDisplay();
     _initStorageAndDb();
+  }
+
+  @override
+  void dispose() {
+    _videoController?.dispose();
+    super.dispose();
   }
 
   Future<void> _loadMoreData() async {
@@ -149,56 +145,38 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
     }
   }
 
-  Future<void> _checkTvDisplay() async {
-    try { final bool c = await platform.invokeMethod('checkDisplay'); setState(() => _isTvConnected = c); } catch (_) {}
-  }
-
   Future<void> _initStorageAndDb() async {
     await Permission.storage.request();
     await Permission.manageExternalStorage.request();
+    await Permission.videos.request();
     final count = await DatabaseHelper.getSongCount();
     setState(() => _totalSongs = count);
     if (count == 0) await _syncExcelData();
   }
 
-  Future<List<Directory>> _discoverStorageRoots() async {
-    final List<Directory> roots = [];
-    for (final path in ['/storage/emulated/0', '/storage/emulated/0/NMH_Karaoke', '/storage/sdcard1', '/storage/sdcard1/NMH_Karaoke']) {
-      final d = Directory(path);
-      if (await d.exists()) roots.add(d);
-    }
+  Future<List<String>> _discoverRoots() async {
+    final List<String> roots = ['/storage/emulated/0', '/storage/emulated/0/NMH_Karaoke'];
     try {
-      final s = Directory('/storage');
-      if (await s.exists()) {
-        await for (final e in s.list()) {
-          if (e is Directory && !e.path.contains('emulated') && !e.path.contains('self')) {
-            roots.add(e);
-            final sub = Directory('${e.path}/NMH_Karaoke');
-            if (await sub.exists()) roots.add(sub);
-          }
+      for (final e in Directory('/storage').listSync()) {
+        if (e is Directory && !e.path.contains('emulated') && !e.path.contains('self')) {
+          roots.add(e.path);
+          roots.add('${e.path}/NMH_Karaoke');
         }
       }
     } catch (_) {}
     return roots;
   }
 
-    Future<void> _syncExcelData() async {
+  Future<void> _syncExcelData() async {
     setState(() => _isSyncing = true);
     await Future.delayed(const Duration(milliseconds: 50));
     try {
-      final roots = await _discoverStorageRoots();
       final List<Song> loaded = [];
-      for (final r in roots) {
-        final q2Csv = p.join(r.path, 'q2.csv');
-        if (await File(q2Csv).exists()) {
-          final raw = _parseCsvFromPath(q2Csv, false);
-          loaded.addAll(raw.map((m) => Song.fromMap(m)));
-        }
-        final dcCsv = p.join(r.path, 'disco.csv');
-        if (await File(dcCsv).exists()) {
-          final raw = _parseCsvFromPath(dcCsv, true);
-          loaded.addAll(raw.map((m) => Song.fromMap(m)));
-        }
+      for (final rPath in await _discoverRoots()) {
+        final q2Csv = p.join(rPath, 'q2.csv');
+        if (File(q2Csv).existsSync()) loaded.addAll(_parseCsvFromPath(q2Csv, false).map((m) => Song.fromMap(m)));
+        final dcCsv = p.join(rPath, 'disco.csv');
+        if (File(dcCsv).existsSync()) loaded.addAll(_parseCsvFromPath(dcCsv, true).map((m) => Song.fromMap(m)));
       }
       if (loaded.isNotEmpty) {
         await DatabaseHelper.clearAndInsertSongs(loaded);
@@ -214,22 +192,12 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
       setState(() => _isSyncing = false);
     }
   }
-  final Map<String, String> _videoIndex = {};
-
-  Future<void> _indexAllVideos() async {
+    Future<void> _indexAllVideos() async {
     if (_videoIndex.isNotEmpty) return;
-    final List<String> roots = ['/storage/emulated/0', '/storage/emulated/0/NMH_Karaoke'];
-    try {
-      for (final e in Directory('/storage').listSync()) {
-        if (e is Directory && !e.path.contains('emulated') && !e.path.contains('self')) {
-          roots.add(e.path);
-          roots.add('${e.path}/NMH_Karaoke');
-        }
-      }
-    } catch (_) {}
     const exts = {'.mp4', '.mkv', '.dat', '.mpg', '.avi'};
-    for (final rPath in roots) {
-      for (final sub in ['Myanmar_songs', 'Myanmar_New_Songs', 'DiscoVideo']) {
+    const folders = ['Myanmar_songs', 'Myanmar _songs', 'Myanmar_New_Songs', 'Myanmar _New_Songs', 'DiscoVideo', 'Disco Video'];
+    for (final rPath in await _discoverRoots()) {
+      for (final sub in folders) {
         final dir = Directory(p.join(rPath, sub));
         if (!dir.existsSync()) continue;
         try {
@@ -241,7 +209,6 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
         } catch (_) {}
       }
     }
-    _showSnack('ဗီဒီယိုဖိုင်ပေါင်း ${_videoIndex.length} ဖိုင် ရှာတွေ့ပါပြီ');
   }
 
   Future<String?> _findVideoPath(String code) async {
@@ -254,29 +221,38 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
     if (playNow) { await _startPlayingSong(song); return; }
     setState(() => _queue.add(song));
     _showSnack('ရွေးချယ်ပြီး: ${song.title}');
-    if (_currentSong == null) _playNextSong();
+    if (_currentSong == null) await _playNextSong();
   }
 
   Future<void> _startPlayingSong(Song song) async {
     final path = await _findVideoPath(song.code);
     if (path == null) { _showSnack('ဗီဒီယိုဖိုင် (${song.code}) မတွေ့ပါ။'); return; }
-    setState(() { _currentSong = song; _isPlaying = true; });
-    await platform.invokeMethod('playVideo', {'path': path});
+    final oldController = _videoController;
+    final newController = VideoPlayerController.file(File(path));
+    await newController.initialize();
+    newController.addListener(() {
+      if (newController.value.position >= newController.value.duration && newController.value.duration > Duration.zero) {
+        _playNextSong();
+      }
+    });
+    await newController.play();
+    setState(() {
+      _videoController = newController;
+      _currentSong = song;
+      _showVideoScreen = true;
+    });
+    await oldController?.dispose();
   }
 
   Future<void> _playNextSong() async {
-    if (_queue.isEmpty) { setState(() { _currentSong = null; _isPlaying = false; }); await platform.invokeMethod('stop'); return; }
+    if (_queue.isEmpty) {
+      await _videoController?.pause();
+      setState(() { _currentSong = null; _showVideoScreen = false; });
+      return;
+    }
     final next = _queue.removeAt(0);
     setState(() {});
     await _startPlayingSong(next);
-  }
-
-  Future<void> _cycleVoiceMode() async {
-    const modes = ['Stereo', 'Left', 'Right', 'Track 2'];
-    const nativeCodes = ['STEREO', 'LEFT', 'RIGHT', 'TRACK2'];
-    final nextIdx = (modes.indexOf(_voiceMode) + 1) % modes.length;
-    await platform.invokeMethod('setVoiceMode', {'mode': nativeCodes[nextIdx]});
-    setState(() => _voiceMode = modes[nextIdx]);
   }
 
   void _showSnack(String msg) {
@@ -287,7 +263,7 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
 
   void _openCategory(String cat) async {
     _searchController.clear();
-    setState(() { _activeView = cat; _selectedSubGroup = null; _searchResults = []; _groupResults = []; _hasMore = true; });
+    setState(() { _activeView = cat; _selectedSubGroup = null; _searchResults = []; _groupResults = []; _hasMore = true; _showVideoScreen = false; });
     if (cat == 'ARTIST' || cat == 'ALBUM') {
       final l = await DatabaseHelper.getDistinctValues(cat == 'ARTIST' ? 'artist' : 'album', '');
       setState(() { _groupResults = l; _hasMore = l.length == 200; });
@@ -307,87 +283,35 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
       setState(() { _searchResults = l; _hasMore = l.length == 200; });
     }
   }
-  bool _isFullVideo = false;
-
-  @override
+    @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFF0A0D14),
       resizeToAvoidBottomInset: false,
       body: SafeArea(
-        child: Column(
-          children: [
-            _buildTopHeader(),
-            Expanded(
-              child: _isFullVideo && !_isTvConnected
-                  ? _buildTabletVideoBox(isFull: true)
-                  : Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      child: Row(
-                        children: [
-                          SizedBox(
-                            width: MediaQuery.of(context).size.width * 0.33,
-                            child: Column(
-                              children: [
-                                if (!_isTvConnected && _currentSong != null) ...[
-                                  _buildTabletVideoBox(isFull: false),
-                                  const SizedBox(height: 6),
-                                ],
-                                Expanded(child: _buildLeftQueueBox()),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(child: _buildRightDashboard()),
-                        ],
-                      ),
-                    ),
-            ),
-            _buildBottomControlBar(),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildTabletVideoBox({required bool isFull}) {
-    return Container(
-      height: isFull ? double.infinity : 150,
-      decoration: BoxDecoration(color: Colors.black, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.amber)),
-      child: Stack(
-        children: [
-          const ClipRRect(borderRadius: BorderRadius.all(Radius.circular(9)), child: AndroidView(viewType: 'nmh_tablet_video')),
-          Positioned(
-            top: 4,
-            right: 4,
-            child: InkWell(
-              onTap: () => setState(() => _isFullVideo = !_isFullVideo),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(6)),
-                child: Row(children: [
-                  Icon(isFull ? Icons.fullscreen_exit : Icons.fullscreen, color: Colors.amber, size: 16),
-                  const SizedBox(width: 4),
-                  Text(isFull ? 'သီချင်းရွေးရန်' : 'မျက်နှာပြင်အပြည့်', style: const TextStyle(color: Colors.amber, fontSize: 11, fontWeight: FontWeight.bold)),
-                ]),
-              ),
-            ),
-          ),
-        ],
+        child: Column(children: [
+          _buildTopHeader(),
+          Expanded(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4), child: Row(children: [SizedBox(width: MediaQuery.of(context).size.width * 0.33, child: _buildLeftQueueBox()), const SizedBox(width: 12), Expanded(child: _buildRightDashboard())]))),
+          _buildBottomControlBar(),
+        ]),
       ),
     );
   }
 
   Widget _buildTopHeader() {
     return Container(
-      height: 60,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      height: 56,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
       child: Row(children: [
-        Container(width: MediaQuery.of(context).size.width * 0.33, decoration: BoxDecoration(color: const Color(0xFF080C16), borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.amber.withOpacity(0.5))), child: ClipRRect(borderRadius: BorderRadius.circular(9), child: Image.asset('assets/logo.jpg', fit: BoxFit.fill, errorBuilder: (_, __, ___) => const Center(child: Text('Capt.နေမျိုးထွန်း', style: TextStyle(color: Colors.amber, fontWeight: FontWeight.bold, fontSize: 18)))))),
-        const SizedBox(width: 14),
-        Expanded(child: Container(height: double.infinity, padding: const EdgeInsets.symmetric(horizontal: 16), decoration: BoxDecoration(color: const Color(0xFF141821), borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.white12)), alignment: Alignment.centerLeft, child: Text(_currentSong != null ? 'ဖွင့်နေသည်: [${_currentSong!.code}] ${_currentSong!.title} (${_currentSong!.artist})' : 'အသင့်ဖြစ်ပါပြီ (စုစုပေါင်း: $_totalSongs ပုဒ် • ${_isTvConnected ? "TV Connected" : "Standalone Mode"})', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)))),
-        const SizedBox(width: 10),
-        InkWell(onTap: _isSyncing ? null : _syncExcelData, child: Container(height: double.infinity, padding: const EdgeInsets.symmetric(horizontal: 14), decoration: BoxDecoration(color: const Color(0xFFB71C1C), borderRadius: BorderRadius.circular(10)), child: Row(children: [Icon(_isSyncing ? Icons.hourglass_top : Icons.sync, color: Colors.white, size: 18), const SizedBox(width: 6), Text(_isSyncing ? 'Syncing...' : 'Sync Excel', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13))]))),
+        Container(width: MediaQuery.of(context).size.width * 0.33, decoration: BoxDecoration(color: const Color(0xFF080C16), borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.amber.withOpacity(0.5))), child: ClipRRect(borderRadius: BorderRadius.circular(9), child: Image.asset('assets/logo.jpg', width: double.infinity, height: double.infinity, fit: BoxFit.fill, errorBuilder: (_, __, ___) => const Center(child: Text('Capt.နေမျိုးထွန်း', style: TextStyle(color: Colors.amber, fontWeight: FontWeight.bold, fontSize: 18)))))),
+        const SizedBox(width: 12),
+        Expanded(child: Container(height: double.infinity, padding: const EdgeInsets.symmetric(horizontal: 14), decoration: BoxDecoration(color: const Color(0xFF141821), borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.white12)), alignment: Alignment.centerLeft, child: Text(_currentSong != null ? 'ဖွင့်နေသည်: [${_currentSong!.code}] ${_currentSong!.title}' : 'အသင့်ဖြစ်ပါပြီ (စုစုပေါင်း: $_totalSongs ပုဒ်)', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white)))),
+        if (_currentSong != null) ...[
+          const SizedBox(width: 8),
+          InkWell(onTap: () => setState(() => _showVideoScreen = !_showVideoScreen), child: Container(height: double.infinity, padding: const EdgeInsets.symmetric(horizontal: 12), decoration: BoxDecoration(color: const Color(0xFF00897B), borderRadius: BorderRadius.circular(10)), child: Row(children: [Icon(_showVideoScreen ? Icons.list_alt : Icons.ondemand_video, color: Colors.white, size: 18), const SizedBox(width: 5), Text(_showVideoScreen ? 'သီချင်းရွေးရန်' : 'Video ကြည့်ရန်', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12))]))),
+        ],
+        const SizedBox(width: 8),
+        InkWell(onTap: _isSyncing ? null : _syncExcelData, child: Container(height: double.infinity, padding: const EdgeInsets.symmetric(horizontal: 12), decoration: BoxDecoration(color: const Color(0xFFB71C1C), borderRadius: BorderRadius.circular(10)), child: Row(children: [Icon(_isSyncing ? Icons.hourglass_top : Icons.sync, color: Colors.white, size: 18), const SizedBox(width: 5), Text(_isSyncing ? 'Syncing...' : 'Sync Excel', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12))]))),
       ]),
     );
   }
@@ -397,11 +321,20 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
       decoration: BoxDecoration(color: const Color(0xFF0E121A), borderRadius: BorderRadius.circular(12), border: Border.all(color: const Color(0xFF00BFA5), width: 1.5)),
       child: Column(children: [
         Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8), decoration: const BoxDecoration(color: Color(0xFF00897B), borderRadius: BorderRadius.vertical(top: Radius.circular(10))), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text('ရွေးထားသောသီချင်းများ (${_queue.length})', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.white)), if (_queue.isNotEmpty) InkWell(onTap: () => setState(() => _queue.clear()), child: const Icon(Icons.playlist_remove, color: Colors.white, size: 20))])),
-        Expanded(child: _queue.isEmpty ? const Center(child: Text('ရွေးထားသော သီချင်း မရှိသေးပါ', style: TextStyle(color: Colors.white38, fontSize: 14))) : ListView.separated(itemCount: _queue.length, separatorBuilder: (_, __) => const Divider(height: 1, color: Colors.white10), itemBuilder: (context, index) { final s = _queue[index]; return ListTile(dense: true, leading: Text('${index + 1}.', style: const TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.bold)), title: Text(s.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)), subtitle: Text('${s.code} • ${s.artist}', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11, color: Colors.white54)), trailing: Row(mainAxisSize: MainAxisSize.min, children: [IconButton(icon: const Icon(Icons.arrow_upward, size: 17, color: Colors.tealAccent), onPressed: index == 0 ? null : () => setState(() { final it = _queue.removeAt(index); _queue.insert(index - 1, it); })), IconButton(icon: const Icon(Icons.arrow_downward, size: 17, color: Colors.tealAccent), onPressed: index == _queue.length - 1 ? null : () => setState(() { final it = _queue.removeAt(index); _queue.insert(index + 1, it); })), IconButton(icon: const Icon(Icons.delete_outline, size: 17, color: Colors.redAccent), onPressed: () => setState(() => _queue.removeAt(index)))])); })),
+        Expanded(child: _queue.isEmpty ? const Center(child: Text('ရွေးထားသော သီချင်း မရှိသေးပါ', style: TextStyle(color: Colors.white38, fontSize: 14))) : ListView.separated(itemCount: _queue.length, separatorBuilder: (_, __) => const Divider(height: 1, color: Colors.white10), itemBuilder: (context, index) { final s = _queue[index]; return ListTile(dense: true, contentPadding: const EdgeInsets.symmetric(horizontal: 8), leading: Text('${index + 1}.', style: const TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.bold)), title: Text(s.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)), subtitle: Text('${s.code} • ${s.artist}', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11, color: Colors.white54)), trailing: Row(mainAxisSize: MainAxisSize.min, children: [IconButton(padding: EdgeInsets.zero, constraints: const BoxConstraints(), icon: const Icon(Icons.arrow_upward, size: 18, color: Colors.tealAccent), onPressed: index == 0 ? null : () => setState(() { final it = _queue.removeAt(index); _queue.insert(index - 1, it); })), const SizedBox(width: 6), IconButton(padding: EdgeInsets.zero, constraints: const BoxConstraints(), icon: const Icon(Icons.arrow_downward, size: 18, color: Colors.tealAccent), onPressed: index == _queue.length - 1 ? null : () => setState(() { final it = _queue.removeAt(index); _queue.insert(index + 1, it); })), const SizedBox(width: 6), IconButton(padding: EdgeInsets.zero, constraints: const BoxConstraints(), icon: const Icon(Icons.close, size: 18, color: Colors.redAccent), onPressed: () => setState(() => _queue.removeAt(index)))])); })),
       ]),
     );
   }
     Widget _buildRightDashboard() {
+    if (_showVideoScreen && _videoController != null && _videoController!.value.isInitialized) {
+      return Container(
+        decoration: BoxDecoration(color: Colors.black, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.amber, width: 1.5)),
+        child: Stack(alignment: Alignment.center, children: [
+          AspectRatio(aspectRatio: _videoController!.value.aspectRatio, child: VideoPlayer(_videoController!)),
+          Positioned(top: 8, right: 8, child: ElevatedButton.icon(style: ElevatedButton.styleFrom(backgroundColor: Colors.black87, foregroundColor: Colors.amber), onPressed: () => setState(() => _showVideoScreen = false), icon: const Icon(Icons.search, size: 16), label: const Text('သီချင်းရွေးရန်', style: TextStyle(fontSize: 12)))),
+        ]),
+      );
+    }
     if (_activeView == 'HOME') {
       return Column(children: [
         Expanded(flex: 4, child: Row(children: [Expanded(flex: 3, child: _remoteBigCard('မြန်မာသီချင်းများ', 'မြန်မာကာရာအိုကေ', Icons.mic_external_on, const [Color(0xFF00897B), Color(0xFF004D40)], Colors.tealAccent, () => _openCategory('MYANMAR'))), const SizedBox(width: 12), Expanded(flex: 2, child: _remoteBigCard('Disco Song', '', Icons.nightlife, const [Color(0xFF4527A0), Color(0xFF1A237E)], Colors.amber, () => _openCategory('DISCO')))])),
@@ -410,46 +343,14 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
       ]);
     }
     return Container(
-      decoration: BoxDecoration(color: const Color(0xFF121620), borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.white12)),
+      decoration: BoxDecoration(color: const Color(0xFF121620), borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.white12)),
       child: Column(children: [
-                Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          child: SizedBox(
-            height: 36,
-            child: Row(children: [
-              ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00897B), foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 10)),
-                onPressed: () => setState(() { if (_selectedSubGroup != null) _selectedSubGroup = null; else _activeView = 'HOME'; }),
-                icon: const Icon(Icons.arrow_back, size: 16),
-                label: Text(_selectedSubGroup != null ? 'နောက်သို့' : 'HOME', style: const TextStyle(fontSize: 12)),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: TextField(
-                  controller: _searchController,
-                  onChanged: _onSearchChanged,
-                  style: const TextStyle(fontSize: 13),
-                  keyboardType: _activeView == 'CODE' ? TextInputType.number : TextInputType.text,
-                  decoration: InputDecoration(
-                    hintText: 'ရှာရန် ရိုက်ထည့်ပါ...',
-                    hintStyle: const TextStyle(fontSize: 12),
-                    filled: true,
-                    fillColor: Colors.white10,
-                    prefixIcon: const Icon(Icons.search, size: 18),
-                    contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 8),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
-                  ),
-                ),
-              ),
-            ]),
-          ),
-        ),
+        Padding(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), child: SizedBox(height: 36, child: Row(children: [ElevatedButton.icon(style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00897B), foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 10)), onPressed: () => setState(() { if (_selectedSubGroup != null) _selectedSubGroup = null; else _activeView = 'HOME'; }), icon: const Icon(Icons.arrow_back, size: 16), label: Text(_selectedSubGroup != null ? 'နောက်သို့' : 'HOME', style: const TextStyle(fontSize: 12))), const SizedBox(width: 8), Expanded(child: TextField(controller: _searchController, onChanged: _onSearchChanged, style: const TextStyle(fontSize: 13), keyboardType: _activeView == 'CODE' ? TextInputType.number : TextInputType.text, decoration: InputDecoration(hintText: 'ရှာရန် ရိုက်ထည့်ပါ...', hintStyle: const TextStyle(fontSize: 12), filled: true, fillColor: Colors.white10, prefixIcon: const Icon(Icons.search, size: 18), contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 8), border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none))))]))),
         Expanded(child: (_activeView == 'ARTIST' || _activeView == 'ALBUM') && _selectedSubGroup == null ? GridView.builder(controller: _scrollController, padding: const EdgeInsets.all(10), gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 3, childAspectRatio: 2.8, crossAxisSpacing: 8, mainAxisSpacing: 8), itemCount: _groupResults.length, itemBuilder: (context, index) { final name = _groupResults[index]; return InkWell(onTap: () async { final songs = await DatabaseHelper.searchSongs(query: name, category: _activeView); setState(() { _selectedSubGroup = name; _searchResults = songs; _hasMore = songs.length == 200; }); }, child: Container(padding: const EdgeInsets.symmetric(horizontal: 10), decoration: BoxDecoration(color: const Color(0xFF1C2230), borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.tealAccent.withOpacity(0.3))), alignment: Alignment.centerLeft, child: Text(name, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)))); }) : ListView.separated(controller: _scrollController, itemCount: _searchResults.length, separatorBuilder: (_, __) => const Divider(height: 1, color: Colors.white10), itemBuilder: (context, index) { final s = _searchResults[index]; return ListTile(dense: true, leading: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: Colors.amber.withOpacity(0.15), borderRadius: BorderRadius.circular(6)), child: Text(s.code, style: const TextStyle(color: Colors.amber, fontWeight: FontWeight.bold))), title: Text(s.title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)), subtitle: Text('${s.artist} • ${s.album}', style: const TextStyle(color: Colors.white54, fontSize: 11)), trailing: Row(mainAxisSize: MainAxisSize.min, children: [ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00897B), foregroundColor: Colors.white), onPressed: () => _addToQueue(s), child: const Text('တန်းစီမည်', style: TextStyle(fontSize: 12))), const SizedBox(width: 6), OutlinedButton(onPressed: () => _addToQueue(s, playNow: true), child: const Text('ဖွင့်မည်', style: TextStyle(fontSize: 12)))])); })),
       ]),
     );
-  }
-
-  Widget _remoteBigCard(String title, String subtitle, IconData icon, List<Color> colors, Color borderColor, VoidCallback onTap) {
+    }
+    Widget _remoteBigCard(String title, String subtitle, IconData icon, List<Color> colors, Color borderColor, VoidCallback onTap) {
     return InkWell(onTap: onTap, borderRadius: BorderRadius.circular(14), child: Container(decoration: BoxDecoration(gradient: LinearGradient(colors: colors), borderRadius: BorderRadius.circular(14), border: Border.all(color: borderColor, width: 1.5)), child: Stack(children: [Positioned(right: 12, bottom: -10, child: Icon(icon, size: 88, color: Colors.white.withOpacity(0.12))), Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [if (subtitle.isEmpty) Icon(icon, color: Colors.amber, size: 28), Text(title, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white)), if (subtitle.isNotEmpty) Text(subtitle, style: const TextStyle(fontSize: 15, color: Colors.white70))]))])));
   }
 
@@ -459,22 +360,22 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
 
   Widget _buildBottomControlBar() {
     return Container(
-      height: 58,
+      height: 56,
       color: const Color(0xFF141821),
       padding: const EdgeInsets.symmetric(horizontal: 8),
       child: Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
-        _bottomBtn(Icons.play_arrow, 'Play/Pause', Colors.pinkAccent, () async { final p = await platform.invokeMethod('pauseResume'); setState(() => _isPlaying = p == true); }),
-        _bottomBtn(Icons.stop, 'Stop', Colors.redAccent, () async { await platform.invokeMethod('stop'); setState(() { _isPlaying = false; _currentSong = null; }); }),
-        _bottomBtn(Icons.repeat, 'Repeat', Colors.purpleAccent, () => platform.invokeMethod('replay')),
-        _bottomBtn(Icons.fast_rewind, '<<<<', Colors.lightBlueAccent, () {}),
-        _bottomBtn(Icons.fast_forward, '>>>>', Colors.lightBlueAccent, () {}),
-        _bottomBtn(Icons.replay, 'Re-Start', Colors.brown, () => platform.invokeMethod('replay')),
+        _bottomBtn(Icons.play_arrow, 'Play/Pause', Colors.pinkAccent, () { final c = _videoController; if (c != null) c.value.isPlaying ? c.pause() : c.play(); }),
+        _bottomBtn(Icons.stop, 'Stop', Colors.redAccent, () async { await _videoController?.pause(); setState(() { _currentSong = null; _showVideoScreen = false; }); }),
+        _bottomBtn(Icons.repeat, 'Repeat', Colors.purpleAccent, () => _videoController?.seekTo(Duration.zero)),
+        _bottomBtn(Icons.fast_rewind, '<<<<', Colors.lightBlueAccent, () { final c = _videoController; if (c != null) c.seekTo(c.value.position - const Duration(seconds: 10)); }),
+        _bottomBtn(Icons.fast_forward, '>>>>', Colors.lightBlueAccent, () { final c = _videoController; if (c != null) c.seekTo(c.value.position + const Duration(seconds: 10)); }),
+        _bottomBtn(Icons.replay, 'Re-Start', Colors.brown, () { _videoController?.seekTo(Duration.zero); _videoController?.play(); }),
         _bottomBtn(Icons.skip_next, 'Next', Colors.pink, _playNextSong),
-        _bottomBtn(Icons.home, 'HOME', Colors.greenAccent, () => setState(() { _activeView = 'HOME'; _selectedSubGroup = null; })),
-        _bottomBtn(Icons.record_voice_over, _voiceMode, Colors.redAccent, _cycleVoiceMode),
-        _bottomBtn(Icons.volume_down, 'Vol-', Colors.cyan, () {}),
-        _bottomBtn(Icons.volume_up, 'Vol+', Colors.cyan, () {}),
-        _bottomBtn(Icons.volume_off, 'Mute', Colors.grey, () {}),
+        _bottomBtn(Icons.home, 'HOME', Colors.greenAccent, () => setState(() { _activeView = 'HOME'; _selectedSubGroup = null; _showVideoScreen = false; })),
+        _bottomBtn(Icons.record_voice_over, _voiceMode, Colors.redAccent, () { const m = ['Stereo', 'Left', 'Right', 'Track 2']; setState(() => _voiceMode = m[(m.indexOf(_voiceMode) + 1) % m.length]); }),
+        _bottomBtn(Icons.volume_down, 'Vol-', Colors.cyan, () { final c = _videoController; if (c != null) c.setVolume((c.value.volume - 0.2).clamp(0.0, 1.0)); }),
+        _bottomBtn(Icons.volume_up, 'Vol+', Colors.cyan, () { final c = _videoController; if (c != null) c.setVolume((c.value.volume + 0.2).clamp(0.0, 1.0)); }),
+        _bottomBtn(Icons.volume_off, 'Mute', Colors.grey, () { final c = _videoController; if (c != null) { _isMuted = !_isMuted; c.setVolume(_isMuted ? 0.0 : 1.0); } }),
       ]),
     );
   }
