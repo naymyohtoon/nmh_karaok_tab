@@ -214,26 +214,34 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
       setState(() => _isSyncing = false);
     }
   }
-       final Map<String, String> _videoIndex = {};
+  final Map<String, String> _videoIndex = {};
 
   Future<void> _indexAllVideos() async {
     if (_videoIndex.isNotEmpty) return;
-    final roots = await _discoverStorageRoots();
-    const subFolders = ['Myanmar_songs', 'Myanmar_New_Songs', 'DiscoVideo'];
-    const exts = {'.mp4', '.mkv', '.dat', '.mpg', '.avi'};
-    for (final r in roots) {
-      for (final sub in subFolders) {
-        final dir = Directory(p.join(r.path, sub));
-        if (await dir.exists()) {
-          try {
-            await for (final entity in dir.list(recursive: true, followLinks: false)) {
-              if (entity is File && exts.contains(p.extension(entity.path).toLowerCase())) {
-                _videoIndex[p.basenameWithoutExtension(entity.path).toLowerCase()] = entity.path;
-              }
+    final Set<String> scanPaths = {'/storage/emulated/0', '/storage/emulated/0/NMH_Karaoke'};
+    for (final base in ['/storage', '/mnt/media_rw']) {
+      final d = Directory(base);
+      if (await d.exists()) {
+        try {
+          await for (final e in d.list()) {
+            if (e is Directory && !e.path.contains('emulated') && !e.path.contains('self')) {
+              scanPaths.add(e.path);
             }
-          } catch (_) {}
-        }
+          }
+        } catch (_) {}
       }
+    }
+    const exts = {'.mp4', '.mkv', '.dat', '.mpg', '.avi'};
+    for (final path in scanPaths) {
+      final dir = Directory(path);
+      if (!await dir.exists()) continue;
+      try {
+        await for (final entity in dir.list(recursive: true, followLinks: false)) {
+          if (entity is File && exts.contains(p.extension(entity.path).toLowerCase())) {
+            _videoIndex[p.basenameWithoutExtension(entity.path).toLowerCase()] = entity.path;
+          }
+        }
+      } catch (_) {}
     }
   }
 
@@ -302,24 +310,21 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
   }
   @override
   Widget build(BuildContext context) {
-    final kbHeight = MediaQuery.of(context).viewInsets.bottom;
-    final isKbOpen = kbHeight > 50;
+    final isKbOpen = MediaQuery.of(context).viewInsets.bottom > 50;
     return Scaffold(
       backgroundColor: const Color(0xFF0A0D14),
-      resizeToAvoidBottomInset: false,
+      resizeToAvoidBottomInset: true,
       body: SafeArea(
         child: Column(
           children: [
             if (!isKbOpen) _buildTopHeader(),
             Expanded(
               child: Padding(
-                padding: EdgeInsets.only(left: 12, right: 12, top: 6, bottom: isKbOpen ? kbHeight + 4 : 6),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                 child: Row(
                   children: [
-                    if (!isKbOpen) ...[
-                      SizedBox(width: MediaQuery.of(context).size.width * 0.33, child: _buildLeftQueueBox()),
-                      const SizedBox(width: 14),
-                    ],
+                    SizedBox(width: MediaQuery.of(context).size.width * 0.33, child: _buildLeftQueueBox()),
+                    const SizedBox(width: 14),
                     Expanded(child: _buildRightDashboard()),
                   ],
                 ),
