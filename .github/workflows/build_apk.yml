@@ -1,0 +1,43 @@
+name: Build NMH Karaoke APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+
+      - name: Initialize Flutter Project
+        run: |
+          flutter create --org com.nmh.karaoke --project-name nmh_karaok_tab .
+          
+      - name: Setup Dependencies and Permissions
+        run: |
+          cp -r custom_src/lib/* lib/ || true
+          cp -r custom_src/android/* android/ || true
+          if [ -f custom_src/pubspec.yaml ]; then cp custom_src/pubspec.yaml pubspec.yaml; fi
+          flutter pub get
+
+      - name: Build Release APK
+        run: flutter build apk --release
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: NMH-Standalone-Karaoke-APK
+          path: build/app/outputs/flutter-apk/app-release.apk
+          
