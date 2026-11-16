@@ -85,18 +85,16 @@ class DatabaseHelper {
   }
 }
 
-List<Map<String, dynamic>> _parseExcelFromPath(String filePath, bool isDisco) {
-  final excel = xls.Excel.decodeBytes(File(filePath).readAsBytesSync());
+List<Map<String, dynamic>> _parseCsvFromPath(String filePath, bool isDisco) {
+  final lines = File(filePath).readAsLinesSync();
   final List<Map<String, dynamic>> list = [];
-  for (final t in excel.tables.keys) {
-    final sheet = excel.tables[t];
-    if (sheet == null) continue;
-    for (int i = 1; i < sheet.rows.length; i++) {
-      final row = sheet.rows[i];
-      String cell(int idx) => (idx < row.length && row[idx]?.value != null) ? row[idx]!.value.toString().trim() : '';
-      if (cell(0).isNotEmpty && cell(1).isNotEmpty) {
-        list.add({'code': cell(0), 'title': cell(1), 'artist': cell(2), 'coArtist': cell(3), 'album': cell(4), 'isDisco': isDisco ? 1 : 0});
-      }
+  for (int i = 1; i < lines.length; i++) {
+    final line = lines[i].trim();
+    if (line.isEmpty) continue;
+    final parts = line.split(',');
+    String cell(int idx) => idx < parts.length ? parts[idx].replaceAll('"', '').trim() : '';
+    if (cell(0).isNotEmpty && cell(1).isNotEmpty) {
+      list.add({'code': cell(0), 'title': cell(1), 'artist': cell(2), 'coArtist': cell(3), 'album': cell(4), 'isDisco': isDisco ? 1 : 0});
     }
   }
   return list;
@@ -179,21 +177,21 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
     return roots;
   }
 
-  Future<void> _syncExcelData() async {
+    Future<void> _syncExcelData() async {
     setState(() => _isSyncing = true);
-    await Future.delayed(const Duration(milliseconds: 100));
+    await Future.delayed(const Duration(milliseconds: 50));
     try {
       final roots = await _discoverStorageRoots();
       final List<Song> loaded = [];
       for (final r in roots) {
-        final q2Path = p.join(r.path, 'q2.xlsx');
-        if (await File(q2Path).exists()) {
-          final raw = _parseExcelFromPath(q2Path, false);
+        final q2Csv = p.join(r.path, 'q2.csv');
+        if (await File(q2Csv).exists()) {
+          final raw = _parseCsvFromPath(q2Csv, false);
           loaded.addAll(raw.map((m) => Song.fromMap(m)));
         }
-        final dcPath = p.join(r.path, 'disco.xlsx');
-        if (await File(dcPath).exists()) {
-          final raw = _parseExcelFromPath(dcPath, true);
+        final dcCsv = p.join(r.path, 'disco.csv');
+        if (await File(dcCsv).exists()) {
+          final raw = _parseCsvFromPath(dcCsv, true);
           loaded.addAll(raw.map((m) => Song.fromMap(m)));
         }
       }
@@ -203,10 +201,10 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
         setState(() => _totalSongs = count);
         _showSnack('သီချင်းပေါင်း $count ပုဒ် ဖတ်သွင်းပြီးပါပြီ။');
       } else {
-        _showSnack('q2.xlsx / disco.xlsx မတွေ့ပါ။');
+        _showSnack('q2.csv / disco.csv မတွေ့ပါ။');
       }
     } catch (e) {
-      _showSnack('Excel Error: $e');
+      _showSnack('CSV Error: $e');
     } finally {
       setState(() => _isSyncing = false);
     }
