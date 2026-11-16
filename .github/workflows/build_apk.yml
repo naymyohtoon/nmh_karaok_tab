@@ -22,15 +22,15 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Setup Project & Copy Files
+      - name: Setup Project & Permissions
         run: |
           flutter create --org com.nmh.karaoke --project-name nmh_karaok_tab .
           mkdir -p assets android/app/src/main/kotlin/com/nmh/karaoke
           cp image_afebac29.jpg assets/logo.jpg || true
           cp custom_src/pubspec.yaml pubspec.yaml
-          cp custom_src/android/app/src/main/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
           cp custom_src/android/app/src/main/kotlin/com/nmh/karaoke/MainActivity.kt android/app/src/main/kotlin/com/nmh/karaoke/MainActivity.kt
           cp custom_src/lib/main.dart lib/main.dart
+          sed -i 's/<application/<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"\/><uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"\/><uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"\/><application android:requestLegacyExternalStorage="true"/g' android/app/src/main/AndroidManifest.xml
           flutter pub get
 
       - name: Build Release APK
