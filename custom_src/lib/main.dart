@@ -218,31 +218,30 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
 
   Future<void> _indexAllVideos() async {
     if (_videoIndex.isNotEmpty) return;
-    final Set<String> scanPaths = {'/storage/emulated/0', '/storage/emulated/0/NMH_Karaoke'};
-    for (final base in ['/storage', '/mnt/media_rw']) {
-      final d = Directory(base);
-      if (await d.exists()) {
+    final List<String> roots = ['/storage/emulated/0', '/storage/emulated/0/NMH_Karaoke'];
+    try {
+      for (final e in Directory('/storage').listSync()) {
+        if (e is Directory && !e.path.contains('emulated') && !e.path.contains('self')) {
+          roots.add(e.path);
+          roots.add('${e.path}/NMH_Karaoke');
+        }
+      }
+    } catch (_) {}
+    const exts = {'.mp4', '.mkv', '.dat', '.mpg', '.avi'};
+    for (final rPath in roots) {
+      for (final sub in ['Myanmar_songs', 'Myanmar_New_Songs', 'DiscoVideo']) {
+        final dir = Directory(p.join(rPath, sub));
+        if (!dir.existsSync()) continue;
         try {
-          await for (final e in d.list()) {
-            if (e is Directory && !e.path.contains('emulated') && !e.path.contains('self')) {
-              scanPaths.add(e.path);
+          for (final entity in dir.listSync(recursive: true, followLinks: false)) {
+            if (entity is File && exts.contains(p.extension(entity.path).toLowerCase())) {
+              _videoIndex[p.basenameWithoutExtension(entity.path).toLowerCase()] = entity.path;
             }
           }
         } catch (_) {}
       }
     }
-    const exts = {'.mp4', '.mkv', '.dat', '.mpg', '.avi'};
-    for (final path in scanPaths) {
-      final dir = Directory(path);
-      if (!await dir.exists()) continue;
-      try {
-        await for (final entity in dir.list(recursive: true, followLinks: false)) {
-          if (entity is File && exts.contains(p.extension(entity.path).toLowerCase())) {
-            _videoIndex[p.basenameWithoutExtension(entity.path).toLowerCase()] = entity.path;
-          }
-        }
-      } catch (_) {}
-    }
+    _showSnack('ဗီဒီယိုဖိုင်ပေါင်း ${_videoIndex.length} ဖိုင် ရှာတွေ့ပါပြီ');
   }
 
   Future<String?> _findVideoPath(String code) async {
@@ -310,27 +309,26 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
   }
   @override
   Widget build(BuildContext context) {
-    final isKbOpen = MediaQuery.of(context).viewInsets.bottom > 50;
     return Scaffold(
       backgroundColor: const Color(0xFF0A0D14),
-      resizeToAvoidBottomInset: true,
+      resizeToAvoidBottomInset: false,
       body: SafeArea(
         child: Column(
           children: [
-            if (!isKbOpen) _buildTopHeader(),
+            _buildTopHeader(),
             Expanded(
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                 child: Row(
                   children: [
                     SizedBox(width: MediaQuery.of(context).size.width * 0.33, child: _buildLeftQueueBox()),
-                    const SizedBox(width: 14),
+                    const SizedBox(width: 12),
                     Expanded(child: _buildRightDashboard()),
                   ],
                 ),
               ),
             ),
-            if (!isKbOpen) _buildBottomControlBar(),
+            _buildBottomControlBar(),
           ],
         ),
       ),
@@ -371,7 +369,38 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
     return Container(
       decoration: BoxDecoration(color: const Color(0xFF121620), borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.white12)),
       child: Column(children: [
-        Padding(padding: const EdgeInsets.all(8), child: Row(children: [ElevatedButton.icon(style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00897B), foregroundColor: Colors.white), onPressed: () => setState(() { if (_selectedSubGroup != null) _selectedSubGroup = null; else _activeView = 'HOME'; }), icon: const Icon(Icons.arrow_back, size: 18), label: Text(_selectedSubGroup != null ? 'နောက်သို့' : 'HOME')), const SizedBox(width: 10), Expanded(child: TextField(controller: _searchController, onChanged: _onSearchChanged, keyboardType: _activeView == 'CODE' ? TextInputType.number : TextInputType.text, decoration: InputDecoration(hintText: 'ရှာရန် ရိုက်ထည့်ပါ...', filled: true, fillColor: Colors.white10, prefixIcon: const Icon(Icons.search), isDense: true, border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none))))])),
+                Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: SizedBox(
+            height: 36,
+            child: Row(children: [
+              ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00897B), foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 10)),
+                onPressed: () => setState(() { if (_selectedSubGroup != null) _selectedSubGroup = null; else _activeView = 'HOME'; }),
+                icon: const Icon(Icons.arrow_back, size: 16),
+                label: Text(_selectedSubGroup != null ? 'နောက်သို့' : 'HOME', style: const TextStyle(fontSize: 12)),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: TextField(
+                  controller: _searchController,
+                  onChanged: _onSearchChanged,
+                  style: const TextStyle(fontSize: 13),
+                  keyboardType: _activeView == 'CODE' ? TextInputType.number : TextInputType.text,
+                  decoration: InputDecoration(
+                    hintText: 'ရှာရန် ရိုက်ထည့်ပါ...',
+                    hintStyle: const TextStyle(fontSize: 12),
+                    filled: true,
+                    fillColor: Colors.white10,
+                    prefixIcon: const Icon(Icons.search, size: 18),
+                    contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 8),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
+                  ),
+                ),
+              ),
+            ]),
+          ),
+        ),
         Expanded(child: (_activeView == 'ARTIST' || _activeView == 'ALBUM') && _selectedSubGroup == null ? GridView.builder(controller: _scrollController, padding: const EdgeInsets.all(10), gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 3, childAspectRatio: 2.8, crossAxisSpacing: 8, mainAxisSpacing: 8), itemCount: _groupResults.length, itemBuilder: (context, index) { final name = _groupResults[index]; return InkWell(onTap: () async { final songs = await DatabaseHelper.searchSongs(query: name, category: _activeView); setState(() { _selectedSubGroup = name; _searchResults = songs; _hasMore = songs.length == 200; }); }, child: Container(padding: const EdgeInsets.symmetric(horizontal: 10), decoration: BoxDecoration(color: const Color(0xFF1C2230), borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.tealAccent.withOpacity(0.3))), alignment: Alignment.centerLeft, child: Text(name, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)))); }) : ListView.separated(controller: _scrollController, itemCount: _searchResults.length, separatorBuilder: (_, __) => const Divider(height: 1, color: Colors.white10), itemBuilder: (context, index) { final s = _searchResults[index]; return ListTile(dense: true, leading: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: Colors.amber.withOpacity(0.15), borderRadius: BorderRadius.circular(6)), child: Text(s.code, style: const TextStyle(color: Colors.amber, fontWeight: FontWeight.bold))), title: Text(s.title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)), subtitle: Text('${s.artist} • ${s.album}', style: const TextStyle(color: Colors.white54, fontSize: 11)), trailing: Row(mainAxisSize: MainAxisSize.min, children: [ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00897B), foregroundColor: Colors.white), onPressed: () => _addToQueue(s), child: const Text('တန်းစီမည်', style: TextStyle(fontSize: 12))), const SizedBox(width: 6), OutlinedButton(onPressed: () => _addToQueue(s, playNow: true), child: const Text('ဖွင့်မည်', style: TextStyle(fontSize: 12)))])); })),
       ]),
     );
