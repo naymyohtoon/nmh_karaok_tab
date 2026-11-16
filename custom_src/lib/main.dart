@@ -181,14 +181,21 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
 
   Future<void> _syncExcelData() async {
     setState(() => _isSyncing = true);
+    await Future.delayed(const Duration(milliseconds: 100));
     try {
       final roots = await _discoverStorageRoots();
       final List<Song> loaded = [];
       for (final r in roots) {
         final q2Path = p.join(r.path, 'q2.xlsx');
-        if (await File(q2Path).exists()) loaded.addAll((await Isolate.run(() => _parseExcelFromPath(q2Path, false))).map((m) => Song.fromMap(m)));
+        if (await File(q2Path).exists()) {
+          final raw = _parseExcelFromPath(q2Path, false);
+          loaded.addAll(raw.map((m) => Song.fromMap(m)));
+        }
         final dcPath = p.join(r.path, 'disco.xlsx');
-        if (await File(dcPath).exists()) loaded.addAll((await Isolate.run(() => _parseExcelFromPath(dcPath, true))).map((m) => Song.fromMap(m)));
+        if (await File(dcPath).exists()) {
+          final raw = _parseExcelFromPath(dcPath, true);
+          loaded.addAll(raw.map((m) => Song.fromMap(m)));
+        }
       }
       if (loaded.isNotEmpty) {
         await DatabaseHelper.clearAndInsertSongs(loaded);
@@ -293,7 +300,7 @@ class _KaraokeHomeScreenState extends State<KaraokeHomeScreen> {
       height: 60,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       child: Row(children: [
-        Container(width: MediaQuery.of(context).size.width * 0.33, decoration: BoxDecoration(color: const Color(0xFF080C16), borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.amber.withOpacity(0.5))), child: ClipRRect(borderRadius: BorderRadius.circular(9), child: Image.asset('assets/logo.jpg', fit: BoxFit.contain, errorBuilder: (_, __, ___) => const Center(child: Text('Capt.နေမျိုးထွန်း', style: TextStyle(color: Colors.amber, fontWeight: FontWeight.bold, fontSize: 18)))))),
+        Container(width: MediaQuery.of(context).size.width * 0.33, decoration: BoxDecoration(color: const Color(0xFF080C16), borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.amber.withOpacity(0.5))), child: ClipRRect(borderRadius: BorderRadius.circular(9), child: Image.asset('assets/logo.jpg', fit: BoxFit.fill, errorBuilder: (_, __, ___) => const Center(child: Text('Capt.နေမျိုးထွန်း', style: TextStyle(color: Colors.amber, fontWeight: FontWeight.bold, fontSize: 18)))))),
         const SizedBox(width: 14),
         Expanded(child: Container(height: double.infinity, padding: const EdgeInsets.symmetric(horizontal: 16), decoration: BoxDecoration(color: const Color(0xFF141821), borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.white12)), alignment: Alignment.centerLeft, child: Text(_currentSong != null ? 'ဖွင့်နေသည်: [${_currentSong!.code}] ${_currentSong!.title} (${_currentSong!.artist})' : 'အသင့်ဖြစ်ပါပြီ (စုစုပေါင်း: $_totalSongs ပုဒ် • ${_isTvConnected ? "TV Connected" : "Standalone Mode"})', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)))),
         const SizedBox(width: 10),
